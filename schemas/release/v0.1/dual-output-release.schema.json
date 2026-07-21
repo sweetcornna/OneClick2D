@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/release/v0.1/dual-output-release.schema.json",
+  "title": "OneClick2D Atomic Dual-Output Release Record v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "release_id", "account_id", "project_id", "project_revision_id", "project_payload_sha256", "status", "oc2d", "layered_psd", "created_at"],
+  "properties": {
+    "format": {"const": "oneclick2d.dual-output-release"},
+    "format_version": {"const": "0.1.0"},
+    "release_id": {"$ref": "#/$defs/id"}, "account_id": {"$ref": "#/$defs/id"}, "project_id": {"$ref": "#/$defs/id"}, "project_revision_id": {"$ref": "#/$defs/id"},
+    "project_payload_sha256": {"$ref": "#/$defs/sha256"},
+    "status": {"enum": ["proposed", "verified", "revoked"]},
+    "oc2d": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "oc2d"}, "media_type": {"const": "application/vnd.oneclick2d.project+zip"}}}]},
+    "layered_psd": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"const": "layered_psd"}, "media_type": {"const": "image/vnd.adobe.photoshop"}}}]},
+    "created_at": {"type": "string", "format": "date-time"}, "revoked_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["role", "media_type", "byte_length", "sha256", "verifier_id", "verifier_version", "verifier_config_sha256", "reopen_passed", "render_or_composite_passed"], "properties": {"role": {"enum": ["oc2d", "layered_psd"]}, "media_type": {"type": "string", "minLength": 3}, "byte_length": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "sha256": {"$ref": "#/$defs/sha256"}, "verifier_id": {"$ref": "#/$defs/id"}, "verifier_version": {"type": "string", "minLength": 1}, "verifier_config_sha256": {"$ref": "#/$defs/sha256"}, "reopen_passed": {"const": true}, "render_or_composite_passed": {"const": true}, "evidence_sha256": {"$ref": "#/$defs/sha256"}}}
+  }
+}

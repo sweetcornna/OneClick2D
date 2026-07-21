@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/validation-report/v0.1/validation-report.schema.json",
+  "title": "OneClick2D Validation Report v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "report_id", "created_at", "cir_sha256", "validator_version", "status", "findings", "export_readiness"],
+  "properties": {
+    "$schema": { "type": "string", "format": "uri-reference" },
+    "format": { "const": "oneclick2d.validation-report" },
+    "format_version": { "const": "0.1.0" },
+    "report_id": { "$ref": "#/$defs/entityId" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "cir_sha256": { "$ref": "#/$defs/sha256" },
+    "validator_version": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["valid", "review", "blocked"] },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "export_readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oc2d", "layered_psd"],
+      "properties": {
+        "oc2d": { "enum": ["ready", "review", "blocked"] },
+        "layered_psd": { "enum": ["ready", "review", "blocked"] }
+      }
+    },
+    "budget_results": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actual", "limit", "passed"],
+        "properties": {
+          "actual": { "type": "number" },
+          "limit": { "type": "number" },
+          "passed": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "entityId": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "category", "message_key", "message_args", "suggested_actions"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$" },
+        "severity": { "enum": ["info", "review", "blocking"] },
+        "category": { "enum": ["INPUT", "PARSE", "INSTANCE", "DEPTH", "MATTE", "INPAINT", "COMPOSITE", "MESH", "RIG", "PHYSICS", "TRACKING", "RENDER", "EXPORT", "RESOURCE", "PRIVACY", "PACKAGE", "LICENSE"] },
+        "entity_id": { "$ref": "#/$defs/entityId" },
+        "message_key": { "type": "string", "pattern": "^finding\\.[a-z0-9_.-]+$" },
+        "message_args": { "type": "object", "additionalProperties": { "type": ["string", "number", "integer", "boolean", "null"] } },
+        "evidence_artifact_ids": { "type": "array", "items": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" } },
+        "suggested_actions": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$" } },
+        "acknowledged": { "type": "boolean", "default": false }
+      }
+    }
+  }
+}

@@ -1,0 +1,82 @@
+registry: oneclick2d.parameters
+version: 0.1.0
+status: gate-f-candidate
+coordinate_convention:
+  image_origin: top-left
+  side: character-anatomical
+  angle_unit: degree
+evaluation:
+  interpolation_1d: linear
+  extrapolation: clamp
+  combination_order: registry_order_then_binding_id
+parameters:
+  - id: head.yaw
+    capability: candidate_mandatory
+    unit: degree
+    template_range: [-15.0, 15.0]
+    neutral: 0.0
+    sign: positive_nose_toward_screen_right
+    roles: [manual, tracking]
+  - id: head.pitch
+    capability: candidate_mandatory
+    unit: degree
+    template_range: [-10.0, 10.0]
+    neutral: 0.0
+    sign: positive_looks_up
+    roles: [manual, tracking]
+  - id: eye.left.open
+    capability: candidate_mandatory
+    unit: normalized
+    template_range: [0.0, 1.0]
+    neutral: 1.0
+    sign: positive_more_open
+    roles: [manual, tracking]
+  - id: eye.right.open
+    capability: candidate_mandatory
+    unit: normalized
+    template_range: [0.0, 1.0]
+    neutral: 1.0
+    sign: positive_more_open
+    roles: [manual, tracking]
+  - id: eye.gaze.x
+    capability: candidate_optional
+    unit: normalized
+    template_range: [-1.0, 1.0]
+    neutral: 0.0
+    sign: positive_screen_right
+    roles: [manual, tracking]
+  - id: eye.gaze.y
+    capability: candidate_optional
+    unit: normalized
+    template_range: [-1.0, 1.0]
+    neutral: 0.0
+    sign: positive_up
+    roles: [manual, tracking]
+  - id: mouth.open
+    capability: candidate_mandatory
+    unit: normalized
+    template_range: [0.0, 1.0]
+    neutral: 0.0
+    sign: positive_more_open
+    roles: [manual, tracking]
+  - id: mouth.form
+    capability: candidate_optional
+    unit: normalized
+    template_range: [-1.0, 1.0]
+    neutral: 0.0
+    sign: negative_narrow_positive_wide
+    roles: [manual, tracking]
+  - id: body.lean
+    capability: research_optional
+    unit: normalized
+    template_range: [-1.0, 1.0]
+    neutral: 0.0
+    sign: positive_screen_right
+    roles: [manual]
+  - id: breath
+    capability: research_optional
+    unit: normalized
+    template_range: [0.0, 1.0]
+    neutral: 0.0
+    sign: positive_inhale
+    roles: [manual]

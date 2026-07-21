@@ -1,0 +1,115 @@
+registry: oneclick2d.reason-codes
+version: 0.1.0
+status: initiation-candidate
+# Distinct axes: eligibility decision, admission outcome, accepted-run terminal state, quality finding.
+operational_causes:
+  - id: INPUT_FILE_UNSAFE
+    applies_to: validation
+    outcome_field: eligibility_decision
+    outcome: BLOCK
+    retryable: false
+    user_action: replace_input
+    http_problem_code: input_file_unsafe
+    message_key: cause.input_file_unsafe
+    telemetry_category: INPUT
+    severity: blocking
+    owner: platform-security
+  - id: INPUT_UNSUPPORTED
+    applies_to: validation
+    outcome_field: eligibility_decision
+    outcome: BLOCK
+    retryable: false
+    user_action: replace_input
+    http_problem_code: input_unsupported
+    message_key: cause.input_unsupported
+    telemetry_category: INPUT
+    severity: blocking
+    owner: product-ml
+  - id: CAPACITY_UNAVAILABLE
+    applies_to: generation_admission
+    outcome_field: admission_outcome
+    outcome: REJECTED
+    creates_run: false
+    retryable: true
+    user_action: retry_after
+    http_problem_code: capacity_unavailable
+    message_key: cause.capacity_unavailable
+    telemetry_category: RESOURCE
+    severity: review
+    owner: platform
+  - id: STAGE_TRANSIENT_FAILURE
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: FAILED
+    retryable: true
+    user_action: retry
+    http_problem_code: stage_transient_failure
+    message_key: cause.stage_transient_failure
+    telemetry_category: RESOURCE
+    severity: review
+    owner: platform
+  - id: USER_CANCELLED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: CANCELLED
+    retryable: false
+    user_action: start_new_run
+    http_problem_code: user_cancelled
+    message_key: cause.user_cancelled
+    telemetry_category: CANCELLED
+    severity: info
+    owner: product
+  - id: EXPORT_VERIFICATION_FAILED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: FAILED
+    retryable: false
+    user_action: contact_support
+    http_problem_code: export_verification_failed
+    message_key: cause.export_verification_failed
+    telemetry_category: EXPORT
+    severity: blocking
+    owner: format-export
+quality_findings:
+  - id: INPUT_POSE_OUTSIDE_ENVELOPE
+    category: INPUT
+    severity: blocking
+    repair: replace_input
+    message_key: finding.input.pose_outside_envelope
+    owner: product-ml
+  - id: ONTOLOGY_SLOT_LOW_CONFIDENCE
+    category: INSTANCE
+    severity: review
+    repair: inspect_or_replace
+    message_key: finding.instance.slot_low_confidence
+    owner: ml
+  - id: GENERATED_REGION_IDENTITY_RISK
+    category: INPAINT
+    severity: blocking
+    repair: replace_input
+    message_key: finding.inpaint.identity_risk
+    owner: ml-graphics
+  - id: MESH_INVALID
+    category: MESH
+    severity: blocking
+    repair: regenerate_or_block
+    message_key: finding.mesh.invalid
+    owner: graphics
+  - id: PARAMETER_RANGE_UNSAFE
+    category: RIG
+    severity: review
+    repair: reduce_or_disable
+    message_key: finding.rig.range_unsafe
+    owner: graphics
+  - id: PACKAGE_INTEGRITY_FAILED
+    category: PACKAGE
+    severity: blocking
+    repair: internal_repackage
+    message_key: finding.package.integrity_failed
+    owner: format-security
+  - id: PSD_INTEROP_FAILED
+    category: EXPORT
+    severity: blocking
+    repair: internal_reexport
+    message_key: finding.export.psd_interop_failed
+    owner: export

@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/validation-report/v0.2/validation-report.schema.json",
+  "title": "OneClick2D Revision-Bound Validation Report v0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format", "format_version", "report_id", "project_revision_id",
+    "project_payload_sha256", "policy_version", "reason_code_registry",
+    "validator", "status", "findings", "acknowledgments", "export_readiness"
+  ],
+  "properties": {
+    "$schema": {"type": "string", "format": "uri-reference"},
+    "format": {"const": "oneclick2d.validation-report"},
+    "format_version": {"const": "0.2.0"},
+    "report_id": {"$ref": "#/$defs/entityId"},
+    "project_revision_id": {"$ref": "#/$defs/entityId"},
+    "project_payload_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_version": {"type": "string", "minLength": 1},
+    "reason_code_registry": {"$ref": "#/$defs/registryRef"},
+    "validator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "config_sha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/entityId"},
+        "version": {"type": "string", "minLength": 1},
+        "config_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "status": {"enum": ["valid", "needs_review", "blocked"]},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "acknowledgments": {"type": "array", "items": {"$ref": "#/$defs/acknowledgment"}},
+    "export_readiness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["oc2d", "layered_psd"],
+      "properties": {
+        "oc2d": {"enum": ["ready", "review", "blocked"]},
+        "layered_psd": {"enum": ["ready", "review", "blocked"]}
+      }
+    },
+    "budget_results": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "actual", "limit", "unit", "passed"],
+        "properties": {
+          "id": {"$ref": "#/$defs/entityId"},
+          "actual": {"type": "number", "minimum": 0},
+          "limit": {"type": "number", "minimum": 0},
+          "unit": {"type": "string", "minLength": 1},
+          "passed": {"type": "boolean"}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "valid"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "export_readiness": {
+            "properties": {
+              "oc2d": {"const": "ready"},
+              "layered_psd": {"const": "ready"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "export_readiness": {
+            "anyOf": [
+              {"properties": {"oc2d": {"const": "blocked"}}},
+              {"properties": {"layered_psd": {"const": "blocked"}}}
+            ]
+          }
+        }
+      },
+      "then": {"properties": {"status": {"const": "blocked"}}}
+    }
+  ],
+  "$defs": {
+    "entityId": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "registryRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "finding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instance_id", "code", "category", "severity", "message_key", "suggested_actions"],
+      "properties": {
+        "instance_id": {"$ref": "#/$defs/entityId"},
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$"},
+        "category": {"enum": ["INPUT", "PARSE", "INSTANCE", "DEPTH", "MATTE", "INPAINT", "COMPOSITE", "MESH", "RIG", "TRACKING", "RENDER", "EXPORT", "RESOURCE", "PRIVACY", "PACKAGE", "LICENSE"]},
+        "severity": {"enum": ["info", "review", "blocking"]},
+        "entity_id": {"$ref": "#/$defs/entityId"},
+        "message_key": {"type": "string", "pattern": "^finding\\.[a-z0-9_.-]+$"},
+        "evidence_artifact_ids": {"type": "array", "items": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}},
+        "suggested_actions": {"type": "array", "items": {"$ref": "#/$defs/entityId"}}
+      }
+    },
+    "acknowledgment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["finding_code", "finding_instance_id", "project_payload_sha256", "policy_version", "acknowledged_at"],
+      "properties": {
+        "finding_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$"},
+        "finding_instance_id": {"$ref": "#/$defs/entityId"},
+        "project_payload_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_version": {"type": "string", "minLength": 1},
+        "acknowledged_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

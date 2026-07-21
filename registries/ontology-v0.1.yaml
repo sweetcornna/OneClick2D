@@ -1,0 +1,74 @@
+registry: oneclick2d.ontology
+version: 0.1.0
+status: gate-f-candidate
+side_convention: character-anatomical
+completion_statuses: [PRESENT, NOT_APPLICABLE, LOW_CONFIDENCE]
+slots:
+  - id: oc2d.character
+    parent: null
+    cardinality: exactly_one
+    applicability: required
+  - id: oc2d.background
+    parent: null
+    cardinality: zero_or_one
+    applicability: optional
+  - id: oc2d.face.base
+    parent: oc2d.character
+    cardinality: exactly_one
+    applicability: required
+  - id: oc2d.eye.left
+    parent: oc2d.face.base
+    side: left
+    cardinality: exactly_one
+    applicability: required
+  - id: oc2d.eye.right
+    parent: oc2d.face.base
+    side: right
+    cardinality: exactly_one
+    applicability: required
+  - id: oc2d.brow.left
+    parent: oc2d.face.base
+    side: left
+    cardinality: zero_or_one
+    applicability: conditional
+  - id: oc2d.brow.right
+    parent: oc2d.face.base
+    side: right
+    cardinality: zero_or_one
+    applicability: conditional
+  - id: oc2d.mouth
+    parent: oc2d.face.base
+    cardinality: exactly_one
+    applicability: required
+  - id: oc2d.hair.front
+    parent: oc2d.character
+    cardinality: zero_or_many
+    applicability: conditional
+  - id: oc2d.hair.side
+    parent: oc2d.character
+    cardinality: zero_or_many
+    applicability: conditional
+  - id: oc2d.hair.back
+    parent: oc2d.character
+    cardinality: zero_or_many
+    applicability: conditional
+  - id: oc2d.neck
+    parent: oc2d.character
+    cardinality: zero_or_one
+    applicability: conditional
+  - id: oc2d.torso
+    parent: oc2d.character
+    cardinality: exactly_one
+    applicability: required
+  - id: oc2d.clothing
+    parent: oc2d.torso
+    cardinality: zero_or_many
+    applicability: conditional
+  - id: oc2d.accessory.front
+    parent: oc2d.character
+    cardinality: zero_or_many
+    applicability: optional
+  - id: oc2d.accessory.back
+    parent: oc2d.character
+    cardinality: zero_or_many
+    applicability: optional

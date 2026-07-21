@@ -1,0 +1,158 @@
+{
+  "$schema": "../../schemas/cir/v0.1/project.schema.json",
+  "format": "oneclick2d.cir",
+  "format_version": "0.1.0",
+  "project_id": "project.minimal",
+  "created_at": "2026-07-21T00:00:00Z",
+  "canvas": {
+    "width": 1024,
+    "height": 1024,
+    "color_space": "srgb",
+    "alpha_mode": "straight",
+    "image_origin": "top-left"
+  },
+  "artifacts": [
+    {
+      "id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "uri": "artifacts/1111111111111111111111111111111111111111111111111111111111111111.png",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "byte_length": 1,
+      "media_type": "image/png",
+      "role": "layer_texture",
+      "sensitivity": "derived_user_content",
+      "producer_stage_result_id": "stage.layer-synthesis",
+      "raster": {
+        "width": 1024,
+        "height": 1024,
+        "channels": 4,
+        "bit_depth": 8,
+        "color_space": "srgb",
+        "alpha_mode": "straight"
+      }
+    },
+    {
+      "id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "uri": "artifacts/2222222222222222222222222222222222222222222222222222222222222222.png",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "byte_length": 1,
+      "media_type": "image/png",
+      "role": "visible_mask",
+      "sensitivity": "derived_user_content",
+      "producer_stage_result_id": "stage.semantic-normalization",
+      "raster": {
+        "width": 1024,
+        "height": 1024,
+        "channels": 1,
+        "bit_depth": 8,
+        "color_space": "mask-linear",
+        "alpha_mode": "none"
+      }
+    },
+    {
+      "id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "uri": "artifacts/3333333333333333333333333333333333333333333333333333333333333333.bin",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "byte_length": 1,
+      "media_type": "application/octet-stream",
+      "role": "mesh_payload",
+      "sensitivity": "derived_user_content",
+      "producer_stage_result_id": "stage.mesh-generation"
+    },
+    {
+      "id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "uri": "artifacts/4444444444444444444444444444444444444444444444444444444444444444.bin",
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "byte_length": 1,
+      "media_type": "application/octet-stream",
+      "role": "mesh_payload",
+      "sensitivity": "derived_user_content",
+      "producer_stage_result_id": "stage.mesh-generation"
+    },
+    {
+      "id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "uri": "artifacts/5555555555555555555555555555555555555555555555555555555555555555.bin",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "byte_length": 1,
+      "media_type": "application/octet-stream",
+      "role": "deformation_payload",
+      "sensitivity": "derived_user_content",
+      "producer_stage_result_id": "stage.rig-binding"
+    }
+  ],
+  "layers": [
+    {
+      "id": "layer.face-base",
+      "name": "Face Base",
+      "semantic": "oc2d.face.base",
+      "side": "center",
+      "instance_index": 0,
+      "bounds": {
+        "x": 256.0,
+        "y": 128.0,
+        "width": 512.0,
+        "height": 640.0
+      },
+      "texture_artifact_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "visible_mask_artifact_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "generation_mode": "none",
+      "confidence": 1.0,
+      "fallback_mode": "none"
+    }
+  ],
+  "occlusion_edges": [],
+  "meshes": [
+    {
+      "id": "mesh.face-base",
+      "layer_id": "layer.face-base",
+      "vertex_payload_artifact_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "index_payload_artifact_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "vertex_count": 4,
+      "triangle_count": 2,
+      "index_type": "uint16",
+      "winding": "clockwise",
+      "deformer_ids": ["deformer.face-warp"]
+    }
+  ],
+  "parameters": [
+    {
+      "id": "head.yaw",
+      "unit": "degrees",
+      "minimum": -15.0,
+      "default": 0.0,
+      "maximum": 15.0
+    }
+  ],
+  "deformers": [
+    {
+      "id": "deformer.face-warp",
+      "type": "warp_grid",
+      "target_ids": ["mesh.face-base"],
+      "order": 0
+    }
+  ],
+  "pose_bindings": [
+    {
+      "id": "pose.head-yaw-negative",
+      "parameter_samples": {
+        "head.yaw": -15.0
+      },
+      "deformation_artifact_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "interpolation": "linear",
+      "extrapolation": "clamp"
+    }
+  ],
+  "physics_worlds": [],
+  "tracking_profile": null,
+  "user_overrides": [],
+  "provenance": {
+    "uri": "provenance/run-manifest.json",
+    "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "format_version": "0.1.0"
+  },
+  "validation": {
+    "uri": "reports/validation.json",
+    "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+    "format_version": "0.1.0"
+  },
+  "extensions": {}
+}

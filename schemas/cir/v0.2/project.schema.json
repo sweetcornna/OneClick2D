@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/cir/v0.2/project.schema.json",
+  "title": "OneClick2D Minimal Renderable Project v0.2 Candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format", "format_version", "project_id", "revision_id", "created_at", "canvas",
+    "ontology_registry_version", "ontology_completion", "reason_code_registry",
+    "parameter_registry", "artifacts", "confidence_facts", "layers", "generated_regions",
+    "meshes", "parameters", "bindings", "provenance", "user_overrides", "extensions"
+  ],
+  "properties": {
+    "$schema": {"type": "string", "format": "uri-reference"},
+    "format": {"const": "oneclick2d.project"},
+    "format_version": {"const": "0.2.0"},
+    "project_id": {"$ref": "#/$defs/entityId"},
+    "revision_id": {"$ref": "#/$defs/entityId"},
+    "parent_revision_id": {"$ref": "#/$defs/entityId"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "canvas": {"$ref": "#/$defs/canvas"},
+    "ontology_registry_version": {"$ref": "#/$defs/semver"},
+    "ontology_completion": {"type": "array", "items": {"$ref": "#/$defs/ontologyCompletion"}},
+    "reason_code_registry": {"$ref": "#/$defs/registryRef"},
+    "parameter_registry": {"$ref": "#/$defs/registryRef"},
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+    "confidence_facts": {"type": "array", "items": {"$ref": "#/$defs/confidenceFact"}},
+    "layers": {"type": "array", "items": {"$ref": "#/$defs/layer"}},
+    "generated_regions": {"type": "array", "items": {"$ref": "#/$defs/generatedRegion"}},
+    "meshes": {"type": "array", "items": {"$ref": "#/$defs/mesh"}},
+    "parameters": {"type": "array", "items": {"$ref": "#/$defs/parameter"}},
+    "bindings": {"type": "array", "items": {"$ref": "#/$defs/binding"}},
+    "provenance": {"type": "array", "items": {"$ref": "#/$defs/provenance"}},
+    "user_overrides": {"type": "array", "items": {"$ref": "#/$defs/userOverride"}},
+    "extensions": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9-]*){2,}$"},
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "entityId": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"},
+    "semver": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "artifactId": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "relativeUri": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[A-Za-z0-9._/-]+$"},
+    "seedU64": {
+      "type": "string",
+      "pattern": "^(?:0[0-9]{19}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{7}|18446744073709[0-4][0-9]{6}|184467440737095[0-4][0-9]{4}|1844674407370955[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$"
+    },
+    "confidence": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"const": "unavailable"}]},
+    "registryRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "sha256"],
+      "properties": {"id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"}, "version": {"$ref": "#/$defs/semver"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "canvas": {
+      "type": "object", "additionalProperties": false,
+      "required": ["width", "height", "image_origin", "color_space", "alpha_mode"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "height": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "image_origin": {"const": "top-left"}, "color_space": {"const": "srgb"}, "alpha_mode": {"const": "straight"}
+      }
+    },
+    "ontologyCompletion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["slot_id", "status", "instance_ids", "confidence_fact_ids", "reason_codes", "evidence_artifact_ids"],
+      "properties": {
+        "slot_id": {"type": "string", "pattern": "^oc2d\\.[a-z0-9.-]+$"},
+        "status": {"enum": ["PRESENT", "NOT_APPLICABLE", "LOW_CONFIDENCE"]},
+        "instance_ids": {"type": "array", "items": {"$ref": "#/$defs/entityId"}},
+        "confidence_fact_ids": {"type": "array", "items": {"$ref": "#/$defs/entityId"}},
+        "reason_codes": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$"}},
+        "evidence_artifact_ids": {"type": "array", "items": {"$ref": "#/$defs/artifactId"}}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "uri", "sha256", "byte_length", "media_type", "role", "sensitivity"],
+      "properties": {
+        "id": {"$ref": "#/$defs/artifactId"}, "uri": {"$ref": "#/$defs/relativeUri"}, "sha256": {"$ref": "#/$defs/sha256"},
+        "byte_length": {"type": "integer", "minimum": 0, "maximum": 4294967296}, "media_type": {"type": "string", "minLength": 3, "maxLength": 127},
+        "role": {"enum": ["source", "layer_texture", "visible_mask", "generated_mask", "mesh_vertices", "mesh_indices", "mesh_delta", "evidence", "preview", "override_mask"]},
+        "sensitivity": {"enum": ["user_content", "derived_user_content", "non_sensitive"]}
+      }
+    },
+    "confidenceFact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "target_id", "score", "calibration_dataset_id", "calibration_method", "calibration_version", "threshold_band", "evidence_artifact_ids", "provenance_id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/entityId"}, "target_id": {"$ref": "#/$defs/entityId"}, "score": {"$ref": "#/$defs/confidence"},
+        "calibration_dataset_id": {"type": "string", "minLength": 1}, "calibration_method": {"type": "string", "minLength": 1},
+        "calibration_version": {"type": "string", "minLength": 1}, "threshold_band": {"enum": ["auto", "review", "block", "unavailable"]},
+        "evidence_artifact_ids": {"type": "array", "items": {"$ref": "#/$defs/artifactId"}}, "provenance_id": {"$ref": "#/$defs/entityId"}
+      }
+    },
+    "bounds": {
+      "type": "object", "additionalProperties": false, "required": ["x", "y", "width", "height", "unit", "space"],
+      "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "width": {"type": "number", "exclusiveMinimum": 0}, "height": {"type": "number", "exclusiveMinimum": 0}, "unit": {"const": "pixel"}, "space": {"const": "source"}}
+    },
+    "layer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "display_name", "slot_id", "side", "texture_artifact_id", "bounds", "visible", "opacity", "blend_mode", "draw_order"],
+      "properties": {"id": {"$ref": "#/$defs/entityId"}, "display_name": {"type": "string", "minLength": 1, "maxLength": 255}, "slot_id": {"type": "string", "pattern": "^oc2d\\.[a-z0-9.-]+$"}, "side": {"enum": ["left", "right", "center", "none"]}, "texture_artifact_id": {"$ref": "#/$defs/artifactId"}, "bounds": {"$ref": "#/$defs/bounds"}, "visible": {"type": "boolean"}, "opacity": {"type": "number", "minimum": 0, "maximum": 1}, "blend_mode": {"const": "normal"}, "draw_order": {"type": "integer", "minimum": 0}}
+    },
+    "generatedRegion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "owner_layer_id", "mask_artifact_id", "reveal_bounds", "feather_width_px", "confidence_fact_id", "provenance_id"],
+      "properties": {"id": {"$ref": "#/$defs/entityId"}, "owner_layer_id": {"$ref": "#/$defs/entityId"}, "mask_artifact_id": {"$ref": "#/$defs/artifactId"}, "reveal_bounds": {"$ref": "#/$defs/bounds"}, "feather_width_px": {"type": "number", "minimum": 0, "maximum": 256}, "confidence_fact_id": {"$ref": "#/$defs/entityId"}, "provenance_id": {"$ref": "#/$defs/entityId"}}
+    },
+    "mesh": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "layer_id", "vertex_payload_artifact_id", "vertex_payload_format", "index_payload_artifact_id", "index_payload_format", "vertex_count", "triangle_count", "winding"],
+      "properties": {"id": {"$ref": "#/$defs/entityId"}, "layer_id": {"$ref": "#/$defs/entityId"}, "vertex_payload_artifact_id": {"$ref": "#/$defs/artifactId"}, "vertex_payload_format": {"const": "oc2d.mesh.xyuv.f32le.v1"}, "index_payload_artifact_id": {"$ref": "#/$defs/artifactId"}, "index_payload_format": {"enum": ["oc2d.indices.u16le.v1", "oc2d.indices.u32le.v1"]}, "vertex_count": {"type": "integer", "minimum": 3, "maximum": 1000000}, "triangle_count": {"type": "integer", "minimum": 1, "maximum": 1000000}, "winding": {"const": "clockwise"}}
+    },
+    "parameter": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "capability", "minimum", "default", "maximum", "safe_minimum", "safe_maximum", "clamp", "manual_enabled", "tracking_enabled"],
+      "properties": {"id": {"$ref": "#/$defs/entityId"}, "capability": {"enum": ["candidate_mandatory", "candidate_optional", "research_optional", "mandatory", "optional"]}, "minimum": {"type": "number"}, "default": {"type": "number"}, "maximum": {"type": "number"}, "safe_minimum": {"type": "number"}, "safe_maximum": {"type": "number"}, "clamp": {"const": true}, "manual_enabled": {"type": "boolean"}, "tracking_enabled": {"type": "boolean"}}
+    },
+    "bindingSample": {
+      "type": "object", "additionalProperties": false, "required": ["parameter_value", "delta_artifact_id", "delta_format"],
+      "properties": {"parameter_value": {"type": "number"}, "delta_artifact_id": {"$ref": "#/$defs/artifactId"}, "delta_format": {"const": "oc2d.delta.xy.f32le.v1"}}
+    },
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "parameter_id", "target_mesh_id", "samples", "interpolation", "extrapolation"],
+      "properties": {"id": {"$ref": "#/$defs/entityId"}, "parameter_id": {"$ref": "#/$defs/entityId"}, "target_mesh_id": {"$ref": "#/$defs/entityId"}, "samples": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/bindingSample"}}, "interpolation": {"const": "linear"}, "extrapolation": {"const": "clamp"}}
+    },
+    "provenance": {
+      "oneOf": [
+        {"$ref": "#/$defs/deterministicProvenance"},
+        {"$ref": "#/$defs/modelProvenance"}
+      ]
+    },
+    "provenanceBase": {
+      "type": "object", "required": ["id", "producer_kind", "stage_id", "implementation_version", "config_sha256", "seed_u64", "input_sha256"],
+      "properties": {"id": {"$ref": "#/$defs/entityId"}, "producer_kind": {"enum": ["deterministic", "model_backed"]}, "stage_id": {"$ref": "#/$defs/entityId"}, "implementation_version": {"type": "string", "minLength": 1}, "config_sha256": {"$ref": "#/$defs/sha256"}, "seed_u64": {"$ref": "#/$defs/seedU64"}, "input_sha256": {"type": "array", "items": {"$ref": "#/$defs/sha256"}}}
+    },
+    "deterministicProvenance": {
+      "allOf": [
+        {"$ref": "#/$defs/provenanceBase"},
+        {"type": "object", "additionalProperties": false, "properties": {"id": true, "producer_kind": {"const": "deterministic"}, "stage_id": true, "implementation_version": true, "config_sha256": true, "seed_u64": true, "input_sha256": true}}
+      ]
+    },
+    "modelProvenance": {
+      "allOf": [
+        {"$ref": "#/$defs/provenanceBase"},
+        {"type": "object", "additionalProperties": false, "required": ["model_id", "model_weights_sha256", "model_license_record_id", "execution_provider", "precision"], "properties": {"id": true, "producer_kind": {"const": "model_backed"}, "stage_id": true, "implementation_version": true, "config_sha256": true, "seed_u64": true, "input_sha256": true, "model_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.@-]{2,127}$"}, "model_weights_sha256": {"$ref": "#/$defs/sha256"}, "model_license_record_id": {"type": "string", "pattern": "^TP-[0-9]{3,}$"}, "execution_provider": {"type": "string", "minLength": 1}, "precision": {"type": "string", "minLength": 1}}}
+      ]
+    },
+    "overrideBase": {
+      "type": "object",
+      "required": ["id", "target_id", "operation", "parent_revision_id", "created_at", "replay_attempt_id", "replay_status"],
+      "properties": {"id": {"$ref": "#/$defs/entityId"}, "target_id": {"$ref": "#/$defs/entityId"}, "operation": {"type": "string"}, "parent_revision_id": {"$ref": "#/$defs/entityId"}, "created_at": {"type": "string", "format": "date-time"}, "replay_attempt_id": {"$ref": "#/$defs/entityId"}, "replay_status": {"enum": ["clean", "applied", "conflict", "rejected"]}, "reason_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$"}}
+    },
+    "userOverride": {
+      "oneOf": [
+        {"allOf": [{"$ref": "#/$defs/overrideBase"}, {"type": "object", "additionalProperties": false, "required": ["mask_artifact_id", "mask_format"], "properties": {"id": true, "target_id": true, "operation": {"enum": ["mask_add", "mask_erase"]}, "parent_revision_id": true, "created_at": true, "replay_attempt_id": true, "replay_status": true, "reason_code": true, "mask_artifact_id": {"$ref": "#/$defs/artifactId"}, "mask_format": {"const": "oc2d.mask.u8.v1"}}}]},
+        {"allOf": [{"$ref": "#/$defs/overrideBase"}, {"type": "object", "additionalProperties": false, "required": ["new_draw_order"], "properties": {"id": true, "target_id": true, "operation": {"const": "draw_order_override"}, "parent_revision_id": true, "created_at": true, "replay_attempt_id": true, "replay_status": true, "reason_code": true, "new_draw_order": {"type": "integer", "minimum": 0}}}]},
+        {"allOf": [{"$ref": "#/$defs/overrideBase"}, {"type": "object", "additionalProperties": false, "required": ["safe_minimum", "safe_maximum"], "properties": {"id": true, "target_id": true, "operation": {"const": "range_reduce"}, "parent_revision_id": true, "created_at": true, "replay_attempt_id": true, "replay_status": true, "reason_code": true, "safe_minimum": {"type": "number"}, "safe_maximum": {"type": "number"}}}]},
+        {"allOf": [{"$ref": "#/$defs/overrideBase"}, {"type": "object", "additionalProperties": false, "properties": {"id": true, "target_id": true, "operation": {"const": "disable_optional"}, "parent_revision_id": true, "created_at": true, "replay_attempt_id": true, "replay_status": true, "reason_code": true}}]},
+        {"allOf": [{"$ref": "#/$defs/overrideBase"}, {"type": "object", "additionalProperties": false, "required": ["replacement_artifact_id"], "properties": {"id": true, "target_id": true, "operation": {"const": "raster_relink"}, "parent_revision_id": true, "created_at": true, "replay_attempt_id": true, "replay_status": true, "reason_code": true, "replacement_artifact_id": {"$ref": "#/$defs/artifactId"}}}]}
+      ]
+    }
+  }
+}

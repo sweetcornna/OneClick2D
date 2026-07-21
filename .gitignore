@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# JavaScript / desktop build
+node_modules/
+.pnpm-store/
+dist/
+build/
+coverage/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local jobs, user content, model/data artifacts
+workspaces/
+artifacts/
+models/weights/
+datasets/
+*.oc2d
+*.moc3
+*.psd
+*.onnx
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+
+# Logs, diagnostics, profiling
+*.log
+logs/
+diagnostics/
+profiles/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key

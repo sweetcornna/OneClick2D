@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/run-manifest/v0.1/run-manifest.schema.json",
+  "title": "OneClick2D Reproducibility Run Manifest v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "run_id", "project_revision_id", "project_payload_sha256", "reason_code_registry", "started_at", "application", "environment", "source_sha256", "stages"],
+  "properties": {
+    "$schema": {"type": "string", "format": "uri-reference"},
+    "format": {"const": "oneclick2d.run-manifest"},
+    "format_version": {"const": "0.1.0"},
+    "run_id": {"$ref": "#/$defs/entityId"},
+    "project_revision_id": {"$ref": "#/$defs/entityId"},
+    "project_payload_sha256": {"$ref": "#/$defs/sha256"},
+    "reason_code_registry": {"$ref": "#/$defs/registryRef"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "application": {"type": "object", "additionalProperties": false, "required": ["version", "build_id", "source_revision"], "properties": {"version": {"type": "string", "minLength": 1}, "build_id": {"type": "string", "minLength": 1}, "source_revision": {"type": "string", "minLength": 1}}},
+    "environment": {"type": "object", "additionalProperties": false, "required": ["profile", "os", "cpu", "ram_bytes", "execution_provider", "precision"], "properties": {"profile": {"type": "string", "minLength": 1}, "os": {"type": "string", "minLength": 1}, "cpu": {"type": "string", "minLength": 1}, "ram_bytes": {"$ref": "#/$defs/safeInteger"}, "gpu": {"type": "string"}, "gpu_driver": {"type": "string"}, "execution_provider": {"type": "string", "minLength": 1}, "precision": {"type": "string", "minLength": 1}, "runtime_versions": {"type": "object", "additionalProperties": {"type": "string"}}}},
+    "source_sha256": {"$ref": "#/$defs/sha256"},
+    "stages": {"type": "array", "items": {"$ref": "#/$defs/stage"}}
+  },
+  "$defs": {
+    "entityId": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "safeInteger": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "seedU64": {"type": "string", "pattern": "^(?:0[0-9]{19}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{7}|18446744073709[0-4][0-9]{6}|184467440737095[0-4][0-9]{4}|1844674407370955[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$"},
+    "registryRef": {"type": "object", "additionalProperties": false, "required": ["id", "version", "sha256"], "properties": {"id": {"type": "string", "minLength": 1}, "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "stageBase": {"type": "object", "required": ["id", "stage_type", "producer_kind", "implementation_version", "config_sha256", "seed_u64", "input_sha256", "output_sha256", "status", "determinism", "duration_ms", "peak_ram_bytes"], "properties": {"id": {"$ref": "#/$defs/entityId"}, "stage_type": {"type": "string", "pattern": "^oc2d\\.[a-z0-9.-]+$"}, "producer_kind": {"enum": ["deterministic", "model_backed"]}, "implementation_version": {"type": "string", "minLength": 1}, "config_sha256": {"$ref": "#/$defs/sha256"}, "seed_u64": {"$ref": "#/$defs/seedU64"}, "input_sha256": {"type": "array", "items": {"$ref": "#/$defs/sha256"}}, "output_sha256": {"type": "array", "items": {"$ref": "#/$defs/sha256"}}, "status": {"enum": ["succeeded", "review", "fallback", "blocked", "cancelled", "failed"]}, "determinism": {"enum": ["byte-exact", "numeric-tolerance", "nondeterministic-declared"]}, "duration_ms": {"$ref": "#/$defs/safeInteger"}, "peak_ram_bytes": {"$ref": "#/$defs/safeInteger"}, "peak_vram_bytes": {"$ref": "#/$defs/safeInteger"}, "finding_codes": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$"}}}},
+    "stage": {"oneOf": [
+      {"allOf": [{"$ref": "#/$defs/stageBase"}, {"type": "object", "additionalProperties": false, "properties": {"id": true, "stage_type": true, "producer_kind": {"const": "deterministic"}, "implementation_version": true, "config_sha256": true, "seed_u64": true, "input_sha256": true, "output_sha256": true, "status": true, "determinism": true, "duration_ms": true, "peak_ram_bytes": true, "peak_vram_bytes": true, "finding_codes": true}}]},
+      {"allOf": [{"$ref": "#/$defs/stageBase"}, {"type": "object", "additionalProperties": false, "required": ["model_id", "model_weights_sha256", "model_license_record_id"], "properties": {"id": true, "stage_type": true, "producer_kind": {"const": "model_backed"}, "implementation_version": true, "config_sha256": true, "seed_u64": true, "input_sha256": true, "output_sha256": true, "status": true, "determinism": true, "duration_ms": true, "peak_ram_bytes": true, "peak_vram_bytes": true, "finding_codes": true, "model_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.@-]{2,127}$"}, "model_weights_sha256": {"$ref": "#/$defs/sha256"}, "model_license_record_id": {"type": "string", "pattern": "^TP-[0-9]{3,}$"}}}]}
+    ]}
+  }
+}

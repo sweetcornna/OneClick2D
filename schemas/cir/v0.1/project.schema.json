@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/cir/v0.1/project.schema.json",
+  "title": "OneClick2D Canonical Intermediate Representation v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "format_version",
+    "project_id",
+    "created_at",
+    "canvas",
+    "artifacts",
+    "layers",
+    "occlusion_edges",
+    "meshes",
+    "parameters",
+    "deformers",
+    "pose_bindings",
+    "physics_worlds",
+    "provenance",
+    "validation"
+  ],
+  "properties": {
+    "$schema": { "type": "string", "format": "uri-reference" },
+    "format": { "const": "oneclick2d.cir" },
+    "format_version": { "const": "0.1.0" },
+    "project_id": { "$ref": "#/$defs/entityId" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "canvas": { "$ref": "#/$defs/canvas" },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "layers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/layer" }
+    },
+    "occlusion_edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/occlusionEdge" }
+    },
+    "meshes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/mesh" }
+    },
+    "parameters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/parameter" }
+    },
+    "deformers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/deformer" }
+    },
+    "pose_bindings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/poseBinding" }
+    },
+    "physics_worlds": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/physicsWorld" }
+    },
+    "tracking_profile": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/trackingProfile" }
+      ],
+      "default": null
+    },
+    "user_overrides": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/userOverride" },
+      "default": []
+    },
+    "provenance": { "$ref": "#/$defs/documentLink" },
+    "validation": { "$ref": "#/$defs/documentLink" },
+    "extensions": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9-]*){2,}$" },
+      "additionalProperties": true,
+      "default": {}
+    }
+  },
+  "$defs": {
+    "entityId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{2,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "relativeUri": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[A-Za-z0-9._/-]+$"
+    },
+    "confidence": {
+      "oneOf": [
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "const": "unavailable" }
+      ]
+    },
+    "canvas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "color_space", "alpha_mode", "image_origin"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "color_space": { "const": "srgb" },
+        "alpha_mode": { "const": "straight" },
+        "image_origin": { "const": "top-left" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "uri", "sha256", "byte_length", "media_type", "role", "sensitivity", "producer_stage_result_id"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "uri": { "$ref": "#/$defs/relativeUri" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "byte_length": { "type": "integer", "minimum": 0 },
+        "media_type": { "type": "string", "minLength": 3, "maxLength": 127 },
+        "role": {
+          "enum": ["source", "visible_mask", "generated_mask", "confidence_map", "layer_texture", "atlas", "mesh_payload", "deformation_payload", "report", "preview"]
+        },
+        "sensitivity": { "enum": ["user_content", "derived_user_content", "non_sensitive"] },
+        "producer_stage_result_id": { "$ref": "#/$defs/entityId" },
+        "raster": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "height", "channels", "bit_depth", "color_space", "alpha_mode"],
+          "properties": {
+            "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+            "height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+            "channels": { "type": "integer", "minimum": 1, "maximum": 4 },
+            "bit_depth": { "enum": [8, 16, 32] },
+            "color_space": { "enum": ["srgb", "linear", "mask-linear"] },
+            "alpha_mode": { "enum": ["none", "straight"] }
+          }
+        }
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "semantic", "side", "instance_index", "bounds", "texture_artifact_id", "visible_mask_artifact_id", "generation_mode", "confidence", "fallback_mode"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "semantic": { "type": "string", "pattern": "^oc2d\\.[a-z0-9.-]+$" },
+        "side": { "enum": ["left", "right", "center", "none"] },
+        "instance_index": { "type": "integer", "minimum": 0 },
+        "parent_layer_id": { "$ref": "#/$defs/entityId" },
+        "bounds": { "$ref": "#/$defs/bounds" },
+        "texture_artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "visible_mask_artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "generated_mask_artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "generation_mode": { "enum": ["none", "seam_pad", "motion_reveal", "full_completion"] },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "fallback_mode": { "enum": ["none", "review", "merged", "rigid", "reduced_motion", "disabled"] }
+      }
+    },
+    "occlusionEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["behind_layer_id", "in_front_layer_id", "source", "confidence", "evidence"],
+      "properties": {
+        "behind_layer_id": { "$ref": "#/$defs/entityId" },
+        "in_front_layer_id": { "$ref": "#/$defs/entityId" },
+        "source": { "enum": ["semantic_rule", "model", "geometry", "user"] },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence": { "type": "array", "items": { "type": "string", "maxLength": 255 } }
+      }
+    },
+    "mesh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "layer_id", "vertex_payload_artifact_id", "index_payload_artifact_id", "vertex_count", "triangle_count", "index_type", "winding"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "layer_id": { "$ref": "#/$defs/entityId" },
+        "vertex_payload_artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "index_payload_artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "vertex_count": { "type": "integer", "minimum": 3, "maximum": 1000000 },
+        "triangle_count": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "index_type": { "enum": ["uint16", "uint32"] },
+        "winding": { "enum": ["clockwise", "counter-clockwise"] },
+        "deformer_ids": { "type": "array", "items": { "$ref": "#/$defs/entityId" }, "default": [] }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "unit", "minimum", "default", "maximum"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "unit": { "enum": ["normalized", "degrees"] },
+        "minimum": { "type": "number" },
+        "default": { "type": "number" },
+        "maximum": { "type": "number" }
+      }
+    },
+    "deformer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "target_ids", "order"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "type": { "enum": ["transform2d", "cage2d", "warp_grid", "mesh_delta"] },
+        "parent_deformer_id": { "$ref": "#/$defs/entityId" },
+        "target_ids": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/entityId" } },
+        "order": { "type": "integer", "minimum": 0 },
+        "payload_artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    },
+    "poseBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parameter_samples", "deformation_artifact_id", "interpolation", "extrapolation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "parameter_samples": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_.-]{2,127}$" },
+          "additionalProperties": { "type": "number" }
+        },
+        "deformation_artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "interpolation": { "enum": ["linear", "bilinear", "barycentric"] },
+        "extrapolation": { "const": "clamp" }
+      }
+    },
+    "physicsWorld": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "solver", "solver_version", "fixed_timestep_seconds", "max_substeps", "chains"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "solver": { "const": "oc2d.pendulum2d" },
+        "solver_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "fixed_timestep_seconds": { "type": "number", "exclusiveMinimum": 0, "maximum": 0.1 },
+        "max_substeps": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "chains": { "type": "array", "items": { "$ref": "#/$defs/physicsChain" } }
+      }
+    },
+    "physicsChain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "root_deformer_id", "particle_count", "damping", "stiffness", "output_scale"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "root_deformer_id": { "$ref": "#/$defs/entityId" },
+        "particle_count": { "type": "integer", "minimum": 2, "maximum": 32 },
+        "damping": { "type": "number", "minimum": 0, "maximum": 1 },
+        "stiffness": { "type": "number", "minimum": 0, "maximum": 1000 },
+        "output_scale": { "type": "number", "minimum": 0, "maximum": 10 }
+      }
+    },
+    "trackingProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "mappings"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "mappings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["signal_id", "parameter_id", "confidence_threshold", "dead_zone", "gain", "loss_hold_seconds", "loss_ease_seconds"],
+            "properties": {
+              "signal_id": { "$ref": "#/$defs/entityId" },
+              "parameter_id": { "$ref": "#/$defs/entityId" },
+              "confidence_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+              "dead_zone": { "type": "number", "minimum": 0, "maximum": 1 },
+              "gain": { "type": "number" },
+              "loss_hold_seconds": { "type": "number", "minimum": 0, "maximum": 5 },
+              "loss_ease_seconds": { "type": "number", "minimum": 0, "maximum": 10 }
+            }
+          }
+        }
+      }
+    },
+    "userOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "target_id", "operation", "created_at", "parent_revision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/entityId" },
+        "target_id": { "$ref": "#/$defs/entityId" },
+        "operation": { "enum": ["mask_add", "mask_erase", "anchor_move", "occlusion_replace", "range_reduce", "disable"] },
+        "data_artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "parent_revision": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "documentLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "sha256", "format_version"],
+      "properties": {
+        "uri": { "$ref": "#/$defs/relativeUri" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "format_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      }
+    }
+  }
+}
