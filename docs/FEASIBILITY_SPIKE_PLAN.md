@@ -107,7 +107,7 @@ Gate F 不预先承诺产品宽参数集。Gate 0 必须在运行 20 项前冻�
 
 仓库提供一个仅使用 Python 标准库、单进程同步执行的 `spikes/gate_f_runner`，用于预先验证 immutable run/stage spec、确定性 seed/digest、attempt-scoped candidate、原子 commit、合作式 cancel、资源记录和 typed manifest。它只运行 purpose-created numeric synthetic fixture，不生成图像、CIR、`.oc2d` 或 PSD。
 
-Smoke 通过只证明合成字节编排正确，不回答第 1 节六个可行性问题。首个真实 `raster.normalize.pillow.v1` Adapter 仅验证锁定 Pillow 12.1.0 profile 下的本地 PNG/JPEG 接收、orientation/color 规范化和 metadata stripping，作为 candidate/comparator 共享的非计分 ingest preflight；它也不回答拆层、补全、绑定、渲染或 PSD 可行性。实际 suitability/decomposition/completion/mesh/rig/render/comparator/PSD adapters 仍受 D-003、D-009 和 Gate 0 激活条件阻止；不得把 synthetic 或 raster normalization stage、结果或 manifest 计入 20 项评分。
+Smoke 通过只证明合成字节编排正确，不回答第 1 节六个可行性问题。首个真实 `raster.normalize.pillow.v1` Adapter 仅验证锁定 Pillow 12.1.0 profile 下的本地 PNG/JPEG 接收、orientation/color 规范化和 metadata stripping，作为 candidate/comparator 共享的非计分 ingest preflight；它也不回答拆层、补全、绑定、渲染或 PSD 可行性。固定 `simple-cutout.comparator.pillow.v1` Adapter 可在同一 profile 下以 purpose-created raster 运行 12 帧 neutral/endpoint/combination 实现预检，但不含计分 seeded trajectory，也不证明 candidate renderer parity。实际 suitability/decomposition/completion/mesh/rig/candidate render/PSD adapters 和 20 项 paired scoring 尚未实现；不得把 synthetic、raster normalization 或 simple-cutout preflight stage、结果或 manifest 计入 20 项评分。
 
 ## 9. 预算与产出
 

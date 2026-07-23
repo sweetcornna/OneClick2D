@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-simple-cutout-comparator/v0.1/report.schema.json",
+  "title": "OneClick2D Gate F Simple-Cutout Comparator Report v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "scope", "adapter_id", "adapter_version", "contract_id", "config_sha256", "seed_u64", "randomness_used", "sequence_scope", "input", "parameters", "patches", "rendering", "frames", "runtime", "finding_codes", "claims"],
+  "properties": {
+    "format": {"const": "oneclick2d.simple-cutout-comparator-report"},
+    "format_version": {"const": "0.1.0"},
+    "scope": {"const": "disposable-gate-f-spike"},
+    "adapter_id": {"const": "simple-cutout.comparator.pillow.v1"},
+    "adapter_version": {"const": "0.1.0"},
+    "contract_id": {"const": "oc2d.spike.simple-cutout-comparator.v1"},
+    "config_sha256": {"$ref": "#/$defs/sha256"},
+    "seed_u64": {"type": "string", "pattern": "^[0-9]{20}$"},
+    "randomness_used": {"const": false},
+    "sequence_scope": {"const": "fixed-neutral-endpoint-combination-preflight"},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["normalized_raster_sha256", "normalization_report_sha256", "normalization_finding_codes", "width", "height", "mode", "bit_depth", "color_space", "alpha_mode"],
+      "properties": {
+        "normalized_raster_sha256": {"$ref": "#/$defs/sha256"},
+        "normalization_report_sha256": {"$ref": "#/$defs/sha256"},
+        "normalization_finding_codes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$"}},
+        "width": {"type": "integer", "minimum": 1, "maximum": 8192},
+        "height": {"type": "integer", "minimum": 1, "maximum": 8192},
+        "mode": {"const": "RGBA"},
+        "bit_depth": {"const": 8},
+        "color_space": {"const": "srgb"},
+        "alpha_mode": {"const": "straight"}
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order", "side_convention"],
+      "properties": {
+        "order": {"const": ["head.yaw", "head.pitch", "eye.left.open", "eye.right.open", "mouth.open"]},
+        "side_convention": {"const": "character-anatomical"}
+      }
+    },
+    "patches": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/patch"}},
+    "rendering": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["coordinate_origin", "rectangle_quantization", "pivot", "feather", "head_transform_inheritance", "identity_patch_policy", "composition_order", "resampling", "rgba_filter_space", "alpha_composite", "outside_rgba", "base_erased", "png"],
+      "properties": {
+        "coordinate_origin": {"const": "top-left"},
+        "rectangle_quantization": {"const": "floor-min-ceil-max-half-open"},
+        "pivot": {"const": "resolved-box-center"},
+        "feather": {"type": "object", "additionalProperties": false, "required": ["source_pixels", "coverage"], "properties": {"source_pixels": {"const": 2}, "coverage": {"const": "linear-inward-min-edge-distance"}}},
+        "head_transform_inheritance": {"const": "locally-active-child-patches"},
+        "identity_patch_policy": {"const": "skip-inactive-local-controls"},
+        "composition_order": {"const": ["head", "eye.screen-left", "eye.screen-right", "mouth"]},
+        "resampling": {"const": "pillow-bilinear"},
+        "rgba_filter_space": {"const": "straight-srgb-u8"},
+        "alpha_composite": {"const": "porter-duff-source-over"},
+        "outside_rgba": {"const": [0, 0, 0, 0]},
+        "base_erased": {"const": false},
+        "png": {"type": "object", "additionalProperties": false, "required": ["compress_level", "optimize", "metadata"], "properties": {"compress_level": {"const": 9}, "optimize": {"const": false}, "metadata": {"const": "srgb-only"}}}
+      }
+    },
+    "frames": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"$ref": "#/$defs/frame"}},
+    "runtime": {"type": "object", "additionalProperties": false, "required": ["pillow"], "properties": {"pillow": {"const": "12.1.0"}}},
+    "finding_codes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$"}},
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semantic_decomposition_performed", "hidden_region_completion_performed", "psd_produced", "gate_f_feasibility_proven"],
+      "properties": {
+        "semantic_decomposition_performed": {"const": false},
+        "hidden_region_completion_performed": {"const": false},
+        "psd_produced": {"const": false},
+        "gate_f_feasibility_proven": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parameter_id", "character_side", "percent_xyxy", "pixel_box_ltrb", "pivot_source_pixel_x2"],
+      "properties": {
+        "id": {"type": "string"},
+        "parameter_id": {"type": ["string", "null"]},
+        "character_side": {"enum": ["left", "right", "not-applicable"]},
+        "percent_xyxy": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer"}},
+        "pixel_box_ltrb": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer", "minimum": 0, "maximum": 8192}},
+        "pivot_source_pixel_x2": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 0, "maximum": 16384}}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "role", "media_type", "sha256", "byte_length"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"},
+        "role": {"const": "simple_cutout_frame"},
+        "media_type": {"const": "image/png"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "byte_length": {"type": "integer", "minimum": 1}
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "id", "parameters", "artifact"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0, "maximum": 11},
+        "id": {"type": "string"},
+        "parameters": {"type": "object"},
+        "artifact": {"$ref": "#/$defs/artifact"}
+      }
+    }
+  }
+}

@@ -90,16 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
     run.set_defaults(func=_run, registry_factory=build_synthetic_registry)
 
-    raster = subparsers.add_parser("raster", help="run the Pillow 12.1.0 raster normalization spike")
+    raster = subparsers.add_parser("raster", help="run the Pillow 12.1.0 raster spike adapters")
     raster.add_argument("--spec", type=Path, required=True)
     raster.add_argument("--source", type=Path, required=True)
     raster.add_argument("--run-id", required=True)
     raster.add_argument("--source-revision", required=True)
     raster.add_argument("--build-id", required=True)
     raster.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
-    from .raster import build_raster_registry
+    from .simple_cutout import build_simple_cutout_registry
 
-    raster.set_defaults(func=_run, registry_factory=build_raster_registry)
+    raster.set_defaults(func=_run, registry_factory=build_simple_cutout_registry)
 
     cancel = subparsers.add_parser("cancel", help="request cooperative cancellation")
     cancel.add_argument("--run-id", required=True)

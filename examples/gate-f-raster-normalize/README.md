@@ -3,8 +3,8 @@
 - **Origin:** purpose-created by `tests/test_gate_f_raster_adapter.py`; no external source or reference.
 - **Owner:** OneClick2D maintainers.
 - **Allowed use:** repository, CI, documentation and local disposable raster-adapter tests.
-- **Content:** a programmatically generated 2×2 RGBA color grid; no character, artwork, face, camera data, model, PSD or customer content.
-- **Generator:** standard-library PNG chunk construction; fixed pixels and zlib level 9.
+- **Content:** a programmatically generated 2×2 RGBA PNG color grid and 12×8 RGB JPEG split-color grid; no character, artwork, face, camera data, model, PSD or customer content.
+- **Generator:** standard-library PNG chunk construction plus the locked Pillow spike dependency for JPEG/EXIF fixtures; fixed pixels and encoder settings.
 - **Trademark/likeness:** none.
 - **Takedown:** repository maintainers may remove or replace it through normal review.
 

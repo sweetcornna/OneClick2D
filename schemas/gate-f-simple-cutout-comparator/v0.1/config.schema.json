@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-simple-cutout-comparator/v0.1/config.schema.json",
+  "title": "OneClick2D Gate F Simple-Cutout Comparator Config v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "profile_id", "required_pillow_version", "sequence_scope", "frames"],
+  "properties": {
+    "format": {"const": "oneclick2d.simple-cutout-comparator-config"},
+    "format_version": {"const": "0.1.0"},
+    "profile_id": {"const": "oc2d.spike.simple-cutout-comparator.v1"},
+    "required_pillow_version": {"const": "12.1.0"},
+    "sequence_scope": {"const": "fixed-neutral-endpoint-combination-preflight"},
+    "frames": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "prefixItems": [
+        {"$ref": "#/$defs/neutral"},
+        {"$ref": "#/$defs/yawMin"},
+        {"$ref": "#/$defs/yawMax"},
+        {"$ref": "#/$defs/pitchMin"},
+        {"$ref": "#/$defs/pitchMax"},
+        {"$ref": "#/$defs/eyeLeftClosed"},
+        {"$ref": "#/$defs/eyeRightClosed"},
+        {"$ref": "#/$defs/eyesClosed"},
+        {"$ref": "#/$defs/mouthMax"},
+        {"$ref": "#/$defs/yawMinPitchMin"},
+        {"$ref": "#/$defs/yawMaxEyesClosed"},
+        {"$ref": "#/$defs/yawMinPitchMaxMouthMax"}
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["head.yaw", "head.pitch", "eye.left.open", "eye.right.open", "mouth.open"],
+      "properties": {
+        "head.yaw": {"type": "number", "minimum": -15, "maximum": 15},
+        "head.pitch": {"type": "number", "minimum": -10, "maximum": 10},
+        "eye.left.open": {"type": "number", "minimum": 0, "maximum": 1},
+        "eye.right.open": {"type": "number", "minimum": 0, "maximum": 1},
+        "mouth.open": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parameters"],
+      "properties": {"id": {"type": "string"}, "parameters": {"$ref": "#/$defs/parameters"}}
+    },
+    "neutral": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "neutral"}, "parameters": {"const": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}}}}]},
+    "yawMin": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "yaw.min"}, "parameters": {"const": {"head.yaw": -15, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}}}}]},
+    "yawMax": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "yaw.max"}, "parameters": {"const": {"head.yaw": 15, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}}}}]},
+    "pitchMin": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "pitch.min"}, "parameters": {"const": {"head.yaw": 0, "head.pitch": -10, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}}}}]},
+    "pitchMax": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "pitch.max"}, "parameters": {"const": {"head.yaw": 0, "head.pitch": 10, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}}}}]},
+    "eyeLeftClosed": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "eye.left.closed"}, "parameters": {"const": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 0, "eye.right.open": 1, "mouth.open": 0}}}}]},
+    "eyeRightClosed": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "eye.right.closed"}, "parameters": {"const": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 0, "mouth.open": 0}}}}]},
+    "eyesClosed": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "eyes.closed"}, "parameters": {"const": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 0, "eye.right.open": 0, "mouth.open": 0}}}}]},
+    "mouthMax": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "mouth.max"}, "parameters": {"const": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 1}}}}]},
+    "yawMinPitchMin": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "yaw.min-pitch.min"}, "parameters": {"const": {"head.yaw": -15, "head.pitch": -10, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}}}}]},
+    "yawMaxEyesClosed": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "yaw.max-eyes.closed"}, "parameters": {"const": {"head.yaw": 15, "head.pitch": 0, "eye.left.open": 0, "eye.right.open": 0, "mouth.open": 0}}}}]},
+    "yawMinPitchMaxMouthMax": {"allOf": [{"$ref": "#/$defs/frame"}, {"properties": {"id": {"const": "yaw.min-pitch.max-mouth.max"}, "parameters": {"const": {"head.yaw": -15, "head.pitch": 10, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 1}}}}]}
+  }
+}

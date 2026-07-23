@@ -38,6 +38,20 @@ def purpose_created_png(*, width: int = 2, height: int = 2, srgb: bool = True) -
     return PNG_SIGNATURE + b"".join(chunks)
 
 
+def purpose_created_jpeg(*, width: int = 12, height: int = 8, orientation: int = 1) -> bytes:
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.new("RGB", (width, height), (0, 0, 255))
+    image.paste((255, 0, 0), (0, 0, width // 2, height))
+    exif = Image.Exif()
+    exif[0x0112] = orientation
+    stream = BytesIO()
+    image.save(stream, format="JPEG", quality=100, subsampling=0, optimize=False, progressive=False, exif=exif)
+    image.close()
+    return stream.getvalue()
+
+
 def config_bytes() -> bytes:
     return (
         json.dumps(
@@ -149,11 +163,74 @@ class GateFRasterAdapterTests(unittest.TestCase):
         self.assertEqual("untagged-assumed-srgb", report["color_policy"])
         self.assertEqual(["RASTER_UNTAGGED_ASSUMED_SRGB"], report["finding_codes"])
 
+    def test_jpeg_normalization_is_deterministic_and_metadata_free(self) -> None:
+        source = purpose_created_jpeg()
+        first_status, first_manifest, first_path = self._run(source, media_type="image/jpeg")
+        second_status, second_manifest, _ = self._run(source, media_type="image/jpeg")
+        self.assertEqual(StageStatus.SUCCEEDED, first_status)
+        self.assertEqual(StageStatus.SUCCEEDED, second_status)
+        first_png = next(item for item in first_manifest["stages"][0]["outputs"] if item["role"] == "normalized_raster")
+        second_png = next(item for item in second_manifest["stages"][0]["outputs"] if item["role"] == "normalized_raster")
+        self.assertEqual(first_png["sha256"], second_png["sha256"])
+        output = (first_path.parent / first_png["uri"]).read_bytes()
+        _verify_output_png(output, (12, 8))
+        self.assertNotIn(b"Exif", output)
+        report = json.loads((first_path.parent / first_manifest["result"]["uri"]).read_text(encoding="utf-8"))
+        self.assertEqual("JPEG", report["input"]["format"])
+        self.assertEqual("image/jpeg", report["input"]["media_type"])
+        self.assertEqual({"value": 1, "applied": False}, report["orientation"])
+        self.assertEqual("untagged-assumed-srgb", report["color_policy"])
+        self.assertEqual(["RASTER_UNTAGGED_ASSUMED_SRGB"], report["finding_codes"])
+
+    def test_jpeg_exif_orientation_is_applied_before_metadata_removal(self) -> None:
+        from io import BytesIO
+        from PIL import Image
+
+        status, manifest, manifest_path = self._run(purpose_created_jpeg(orientation=6), media_type="image/jpeg")
+        self.assertEqual(StageStatus.SUCCEEDED, status)
+        raster = next(item for item in manifest["stages"][0]["outputs"] if item["role"] == "normalized_raster")
+        output = (manifest_path.parent / raster["uri"]).read_bytes()
+        _verify_output_png(output, (8, 12))
+        self.assertNotIn(b"Exif", output)
+        with Image.open(BytesIO(output)) as normalized:
+            top = normalized.getpixel((4, 2))
+            bottom = normalized.getpixel((4, 9))
+        self.assertGreater(top[0], top[2])
+        self.assertGreater(bottom[2], bottom[0])
+        report = json.loads((manifest_path.parent / manifest["result"]["uri"]).read_text(encoding="utf-8"))
+        self.assertEqual({"value": 6, "applied": True}, report["orientation"])
+        self.assertEqual({"width": 12, "height": 8}, {key: report["input"][key] for key in ("width", "height")})
+        self.assertEqual({"width": 8, "height": 12}, {key: report["output"][key] for key in ("width", "height")})
+
     def test_media_type_mismatch_is_blocked(self) -> None:
         status, manifest, _ = self._run(purpose_created_png(), media_type="image/jpeg")
         self.assertEqual(StageStatus.BLOCKED, status)
         self.assertEqual("RASTER_MEDIA_TYPE_MISMATCH", manifest["terminal_reason_code"])
         self.assertNotIn("result", manifest)
+
+        status, manifest, _ = self._run(purpose_created_jpeg(), media_type="image/png")
+        self.assertEqual(StageStatus.BLOCKED, status)
+        self.assertEqual("RASTER_MEDIA_TYPE_MISMATCH", manifest["terminal_reason_code"])
+        self.assertNotIn("result", manifest)
+
+    def test_invalid_jpeg_exif_orientation_is_blocked(self) -> None:
+        status, manifest, _ = self._run(purpose_created_jpeg(orientation=9), media_type="image/jpeg")
+        self.assertEqual(StageStatus.BLOCKED, status)
+        self.assertEqual("RASTER_EXIF_INVALID", manifest["terminal_reason_code"])
+        self.assertNotIn("result", manifest)
+
+    def test_jpeg_trailing_bytes_are_blocked(self) -> None:
+        status, manifest, _ = self._run(purpose_created_jpeg() + b"trailing", media_type="image/jpeg")
+        self.assertEqual(StageStatus.BLOCKED, status)
+        self.assertEqual("RASTER_CONTAINER_INVALID", manifest["terminal_reason_code"])
+
+    def test_mpo_control_segment_is_blocked(self) -> None:
+        source = purpose_created_jpeg()
+        mpf_payload = b"MPF\x00"
+        mpf_segment = b"\xff\xe2" + struct.pack(">H", len(mpf_payload) + 2) + mpf_payload
+        status, manifest, _ = self._run(source[:2] + mpf_segment + source[2:], media_type="image/jpeg")
+        self.assertEqual(StageStatus.BLOCKED, status)
+        self.assertEqual("RASTER_MULTIFRAME_UNSUPPORTED", manifest["terminal_reason_code"])
 
     def test_trailing_bytes_are_blocked(self) -> None:
         status, manifest, _ = self._run(purpose_created_png() + b"trailing")
