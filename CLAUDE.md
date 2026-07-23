@@ -4,14 +4,15 @@
 
 OneClick2D 处于文档优先的立项/可行性阶段。Gate F 尚未证明核心技术假设，也没有固定生产 Python/Node/GPU 栈。不要擅自添加框架或编造 build/dev 命令；先关闭 OPEN_DECISIONS.md 的对应决策并写 ADR。
 
-当前只使用 Python 标准库：
+固定文档 lint、单元测试和 synthetic smoke 只要求 Python 标准库；首个真实 raster Adapter 的 Pillow 12.1.0 仅是 hash-pinned disposable spike 依赖，不是生产技术栈决策：
 
 ```bash
 python scripts/validate_docs.py
 python -m unittest discover -s tests -p "test_*.py"
+python -m spikes.gate_f_runner smoke --run-id run.local-smoke
 ```
 
-该检查只能称为“立项文档 lint”，不是 schema conformance、格式一致性、安全或可行性证明。技术栈选定后，同一变更更新 README、CONTRIBUTING 和本文件的固定命令。
+文档检查只能称“立项文档 lint”；固定 smoke 只能称“标准库合成编排 smoke”；真实 raster Adapter 只能证明其锁定 profile 下的非计分 ingest/normalization 边界。它们都不是 schema/package conformance、安全隔离、模型/PSD 或 Gate F 可行性证明。Gate F 前可执行预研放在 `spikes/`，任何生产包不得导入它。技术栈选定后，同一变更更新 README、CONTRIBUTING 和本文件的固定命令。
 
 ## 产品硬边界
 

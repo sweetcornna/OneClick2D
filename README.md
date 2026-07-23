@@ -32,14 +32,17 @@ OneClick2D 是暂定的内部项目代号。项目探索把一张经过授权、
 
 文档入口见 [docs/index.md](docs/index.md)。开发和评审要求见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [开发规范](docs/DEVELOPMENT_STANDARDS.md)。
 
-## 当前检查
+## 当前检查与预研烟雾测试
 
 ```bash
 python scripts/validate_docs.py
 python -m unittest discover -s tests -p "test_*.py"
+python -m spikes.gate_f_runner smoke --run-id run.local-smoke
 ```
 
-当前命令仅执行**立项文档 lint**，不代表模型、格式、隐私、安全或产品可行性已经通过验证。
+前两项是立项文档 lint 和单元测试；Pillow 相关测试仅在依赖存在时运行。第三项仅验证可丢弃的标准库本地 Gate F 编排骨架能以不可变输入、确定性种子和 attempt 输出生成 typed manifest；结果写入被 Git 忽略的 `workspaces/gate-f-spike/`。另有固定 Pillow 12.1.0 的真实 raster normalization Adapter，但它是按显式 `raster` 命令和 run spec 运行的非计分 ingest preflight，不改变当前固定 smoke 命令或生产技术栈。
+
+这些命令不证明 JSON Schema/package conformance、安全隔离、模型质量、拆层/补全/绑定、PSD 互操作或 Gate F 可行性。
 
 ## 许可
 

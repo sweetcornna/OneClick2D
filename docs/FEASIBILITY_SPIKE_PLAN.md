@@ -76,7 +76,7 @@ Gate F 不预先承诺产品宽参数集。Gate 0 必须在运行 20 项前冻�
 
 ## 6. 通过标准
 
-20 个素材必须全部运行。Gate 0 预注册一个有决策意义的 static/simple-cutout comparator、paired primary metric、最小 superiority margin、不确定性方法和 tie/missing rule。通过要求：
+20 个素材必须全部运行。技术选择已冻结在 [Gate F 技术预注册决策](gate-records/GATE_F_TECHNICAL_PREREGISTRATION.md)：固定 simple-cutout comparator、盲化 paired primary metric、净胜 margin、exact binomial 不确定性及 tie/missing rule。该决策须由 Gate 0 绑定不可变 tree，并在 D-003/D-009 关闭后才激活。通过要求：
 
 - 至少 12/20 达到 [质量计划](QUALITY_PLAN.md) 的 `F-USABLE`；
 - 自动路径按预注册 paired rule 优于 comparator；不满足时 PASS 不可用，只能 RECHARTER 或 STOP；
@@ -103,7 +103,13 @@ Gate F 不预先承诺产品宽参数集。Gate 0 必须在运行 20 项前冻�
 
 任何选择都要更新项目章程、需求、指标和外部表述。
 
-## 8. 预算与产出
+## 8. 可丢弃编排骨架
+
+仓库提供一个仅使用 Python 标准库、单进程同步执行的 `spikes/gate_f_runner`，用于预先验证 immutable run/stage spec、确定性 seed/digest、attempt-scoped candidate、原子 commit、合作式 cancel、资源记录和 typed manifest。它只运行 purpose-created numeric synthetic fixture，不生成图像、CIR、`.oc2d` 或 PSD。
+
+Smoke 通过只证明合成字节编排正确，不回答第 1 节六个可行性问题。首个真实 `raster.normalize.pillow.v1` Adapter 仅验证锁定 Pillow 12.1.0 profile 下的本地 PNG/JPEG 接收、orientation/color 规范化和 metadata stripping，作为 candidate/comparator 共享的非计分 ingest preflight；它也不回答拆层、补全、绑定、渲染或 PSD 可行性。实际 suitability/decomposition/completion/mesh/rig/render/comparator/PSD adapters 仍受 D-003、D-009 和 Gate 0 激活条件阻止；不得把 synthetic 或 raster normalization stage、结果或 manifest 计入 20 项评分。
+
+## 9. 预算与产出
 
 Gate 0 必须批准人员、GPU 时数、素材/标注、PSD 编辑器席位和法律/许可审查预算。产出包括：
 

@@ -1,0 +1,4 @@
+# Disposable local Gate F raster spike only; not a production Python stack decision.
+# CPython 3.14 / Windows x86-64 wheel from PyPI.
+Pillow==12.1.0 \
+    --hash=sha256:4f9f6a650743f0ddee5593ac9e954ba1bdbc5e150bc066586d4f26127853ab94

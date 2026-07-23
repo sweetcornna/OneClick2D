@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-run-spec/v0.1/run-spec.schema.json",
+  "title": "OneClick2D Disposable Gate F Run Specification v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "scope", "execution_profile", "root_seed_u64", "source", "expected_result_role", "stages"],
+  "properties": {
+    "$schema": {"type": "string", "format": "uri-reference"},
+    "format": {"const": "oneclick2d.gate-f-run-spec"},
+    "format_version": {"const": "0.1.0"},
+    "scope": {"const": "disposable-gate-f-spike"},
+    "execution_profile": {"enum": ["python-stdlib-in-process-v1", "python-pillow-12.1.0-in-process-v1"]},
+    "root_seed_u64": {"$ref": "#/$defs/seedU64"},
+    "source": {"$ref": "#/$defs/source"},
+    "expected_result_role": {"$ref": "#/$defs/id"},
+    "stages": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/stage"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "seedU64": {"type": "string", "pattern": "^[0-9]{20}$"},
+    "source": {"type": "object", "additionalProperties": false, "required": ["role", "sha256", "media_type", "max_bytes"], "properties": {"role": {"$ref": "#/$defs/id"}, "sha256": {"$ref": "#/$defs/sha256"}, "media_type": {"type": "string", "minLength": 3, "maxLength": 127}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 104857600}}},
+    "limits": {"type": "object", "additionalProperties": false, "required": ["max_wall_time_ms", "max_cpu_time_ms", "max_peak_ram_bytes", "max_scratch_bytes", "max_output_bytes", "max_output_files", "max_peak_vram_bytes", "gpu_allowed"], "properties": {"max_wall_time_ms": {"type": "integer", "minimum": 1, "maximum": 3600000}, "max_cpu_time_ms": {"type": "integer", "minimum": 1, "maximum": 3600000}, "max_peak_ram_bytes": {"type": "integer", "minimum": 1048576, "maximum": 9007199254740991}, "max_scratch_bytes": {"type": "integer", "minimum": 0, "maximum": 10737418240}, "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 10737418240}, "max_output_files": {"type": "integer", "minimum": 1, "maximum": 1024}, "max_peak_vram_bytes": {"const": 0}, "gpu_allowed": {"const": false}}},
+    "stage": {"type": "object", "additionalProperties": false, "required": ["id", "stage_type", "adapter_id", "config_uri", "config_sha256", "limits"], "properties": {"id": {"$ref": "#/$defs/id"}, "stage_type": {"type": "string", "pattern": "^oc2d\\.spike\\.[a-z0-9.-]+$"}, "adapter_id": {"$ref": "#/$defs/id"}, "config_uri": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[A-Za-z0-9._/-]+$"}, "config_sha256": {"$ref": "#/$defs/sha256"}, "limits": {"$ref": "#/$defs/limits"}}}
+  }
+}

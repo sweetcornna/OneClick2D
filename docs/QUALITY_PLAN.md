@@ -38,7 +38,7 @@ Severity-1 包括眼/口缺失或重复、身份改变的脸部补全、正常�
 
 ## 3. Gate F kill gate
 
-20 项全部运行自动路径。Gate 0 先冻结评分能力集合、static/simple-cutout comparator、paired primary metric、最小 superiority margin、不确定性和 tie/missing 规则。通过同时要求：至少 12/20 `F-USABLE`；自动路径按预注册 paired rule 优于 comparator；强制语义槽位存在率 ≥90%；任一 n≥3 预注册切片不为 0 成功；容差外原始可见像素零改写；全部几何有限/索引/拓扑有效；身份改变脸部补全零通过；PSD 证明通过。未达到 superiority 只能 RECHARTER/STOP。报告二项及 paired 不确定性，不作总体质量声明。
+20 项全部运行自动路径。评分能力、static/simple-cutout comparator、paired primary metric、最小 superiority margin、不确定性、切片和 tie/missing 规则已由 [Gate F 技术预注册决策](gate-records/GATE_F_TECHNICAL_PREREGISTRATION.md)冻结，但须待 Gate 0 绑定 immutable tree 且 D-003/D-009 关闭后才激活。通过同时要求：至少 12/20 `F-USABLE`；自动路径按预注册 paired rule 优于 comparator；强制语义槽位存在率 ≥90%；任一 n≥3 预注册切片不为 0 成功；容差外原始可见像素零改写；全部几何有限/索引/拓扑有效；身份改变脸部补全零通过；PSD 证明通过。未达到 superiority 只能 RECHARTER/STOP。报告二项及 paired 不确定性，不作总体质量声明。
 
 ## 4. Gate 2/3 停止规则
 

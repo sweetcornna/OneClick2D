@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-raster-normalization/v0.1/config.schema.json",
+  "title": "OneClick2D Gate F Raster Normalization Config v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["max_width", "max_height", "max_pixels", "max_metadata_bytes", "max_icc_profile_bytes", "required_pillow_version", "png_compress_level", "rendering_intent"],
+  "properties": {
+    "max_width": {"type": "integer", "minimum": 1, "maximum": 8192},
+    "max_height": {"type": "integer", "minimum": 1, "maximum": 8192},
+    "max_pixels": {"type": "integer", "minimum": 1, "maximum": 40000000},
+    "max_metadata_bytes": {"type": "integer", "minimum": 0, "maximum": 4194304},
+    "max_icc_profile_bytes": {"type": "integer", "minimum": 0, "maximum": 1048576},
+    "required_pillow_version": {"const": "12.1.0"},
+    "png_compress_level": {"type": "integer", "minimum": 0, "maximum": 9},
+    "rendering_intent": {"type": "integer", "minimum": 0, "maximum": 3}
+  }
+}

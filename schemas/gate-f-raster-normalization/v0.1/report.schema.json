@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-raster-normalization/v0.1/report.schema.json",
+  "title": "OneClick2D Gate F Raster Normalization Report v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "scope", "adapter_id", "adapter_version", "contract_id", "input", "orientation", "color_policy", "output", "metadata_removed", "finding_codes", "runtime", "gate_f_feasibility_proven"],
+  "properties": {
+    "format": {"const": "oneclick2d.raster-normalization-report"},
+    "format_version": {"const": "0.1.0"},
+    "scope": {"const": "disposable-gate-f-spike"},
+    "adapter_id": {"const": "raster.normalize.pillow.v1"},
+    "adapter_version": {"const": "0.1.0"},
+    "contract_id": {"const": "oc2d.spike.raster-normalize.v1"},
+    "input": {"type": "object", "additionalProperties": false, "required": ["format", "media_type", "width", "height", "mode", "bit_depth", "frame_count"], "properties": {"format": {"enum": ["PNG", "JPEG"]}, "media_type": {"enum": ["image/png", "image/jpeg"]}, "width": {"type": "integer", "minimum": 1, "maximum": 8192}, "height": {"type": "integer", "minimum": 1, "maximum": 8192}, "mode": {"type": "string", "minLength": 1, "maxLength": 16}, "bit_depth": {"type": "integer", "minimum": 1, "maximum": 8}, "frame_count": {"const": 1}}},
+    "orientation": {"type": "object", "additionalProperties": false, "required": ["value", "applied"], "properties": {"value": {"type": "integer", "minimum": 1, "maximum": 8}, "applied": {"type": "boolean"}}},
+    "color_policy": {"enum": ["embedded-icc-to-srgb", "png-srgb-declared", "untagged-assumed-srgb"]},
+    "output": {"type": "object", "additionalProperties": false, "required": ["width", "height", "mode", "bit_depth", "color_space", "alpha_mode", "sha256", "byte_length"], "properties": {"width": {"type": "integer", "minimum": 1, "maximum": 8192}, "height": {"type": "integer", "minimum": 1, "maximum": 8192}, "mode": {"const": "RGBA"}, "bit_depth": {"const": 8}, "color_space": {"const": "srgb"}, "alpha_mode": {"const": "straight"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "byte_length": {"type": "integer", "minimum": 1, "maximum": 10737418240}}},
+    "metadata_removed": {"const": ["exif", "icc", "text", "comment", "dpi", "xmp"]},
+    "finding_codes": {"type": "array", "uniqueItems": true, "items": {"enum": ["RASTER_UNTAGGED_ASSUMED_SRGB"]}},
+    "runtime": {"type": "object", "additionalProperties": false, "required": ["pillow"], "properties": {"pillow": {"const": "12.1.0"}}},
+    "gate_f_feasibility_proven": {"const": false}
+  }
+}

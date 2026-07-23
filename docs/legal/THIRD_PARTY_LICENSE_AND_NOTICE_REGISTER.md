@@ -11,7 +11,7 @@
 | TP-004 | browser tracker | TBD | TBD | 本地摄像头预览 | TBD | TBD | TBD | TBD | TBD | N/A | TBD | TBD | TBD | 手动控制 | Blocked |
 | TP-005 | exact Photoshop | TBD | vendor | 兼容性烟雾测试 | service/EULA | N/A | N/A | TBD | N/A | 席位/机器/自动化权利 | TBD | vendor | TBD | 无法验证则重新立项 | Blocked |
 | TP-006 | exact Krita | TBD | upstream | 兼容性烟雾测试 | TBD | N/A | N/A | TBD | TBD | TBD | TBD | TBD | TBD | 替换版本 | Blocked |
-
+| TP-007 | spike image library | Pillow 12.1.0 / PyPI CPython 3.14 win_amd64 wheel SHA-256 `4f9f6a650743f0ddee5593ac9e954ba1bdbc5e150bc066586d4f26127853ab94` | [PyPI](https://pypi.org/project/pillow/12.1.0/) / [source tag](https://github.com/python-pillow/Pillow/tree/12.1.0) | 本地可丢弃 PNG/JPEG 接收/规范化 | MIT-CMU；保留版权和许可通知；名称宣传限制；无担保 | N/A | 软件许可不授予模型/数据/素材权利 | 代码许可允许；产品准入仍未决定 | 允许，须携 notices | N/A | 分发副本保留 LICENSE/版权/许可；supporting docs 包含 notices | 12.1.x 安全维护需复核；严格 pin 12.1.0 | Spike owner / 2026-08-22 | 删除 Adapter/回退 synthetic smoke | Allowed for disposable local spike only |
 ## 准入规则
 
 1. 软件许可、模型权重、训练数据、字体/素材、托管服务和编辑器测试权利分别审查；

@@ -15,9 +15,10 @@
 ```bash
 python scripts/validate_docs.py
 python -m unittest discover -s tests -p "test_*.py"
+python -m spikes.gate_f_runner smoke --run-id run.local-smoke
 ```
 
-结果仅是立项文档 lint。技术栈 ADR 通过后，在 README、CONTRIBUTING 和 CLAUDE.md 同一变更补齐固定安装、构建、格式、lint、类型、测试和开发命令。
+文档检查仅是立项 lint；固定 `smoke` 命令仍是标准库、进程内、可丢弃的合成编排 smoke。`raster.normalize.pillow.v1` 另以 hash-pinned Pillow 12.1.0 运行本地非计分 ingest preflight；它不是生产栈、也不是 Gate F 核心可行性证据。Gate F 前可执行预研必须放在 `spikes/`，生产模块不得导入它。技术栈 ADR 通过后，在 README、CONTRIBUTING 和 CLAUDE.md 同一变更补齐固定安装、构建、格式、lint、类型、测试和开发命令。
 
 ## 分支/提交/评审
 

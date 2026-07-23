@@ -22,6 +22,7 @@ Thumbs.db
 
 # Local jobs, user content, model/data artifacts
 workspaces/
+spikes/**/local-output/
 artifacts/
 models/weights/
 datasets/
