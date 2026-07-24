@@ -116,12 +116,65 @@ def strict_load_json_bytes(data: bytes) -> Any:
     return value
 
 
+def _jcs_number(value: int | float) -> str:
+    if isinstance(value, int):
+        return str(value)
+    if value == 0:
+        return "0"
+    negative = value < 0
+    text = repr(abs(value)).lower()
+    coefficient, exponent_text = (text.split("e", 1) + ["0"])[:2] if "e" in text else (text, "0")
+    exponent = int(exponent_text)
+    integer, dot, fraction = coefficient.partition(".")
+    digits = (integer + fraction).lstrip("0") or "0"
+    decimal_position = len(integer) + exponent - (len(integer + fraction) - len((integer + fraction).lstrip("0")))
+    while len(digits) > 1 and digits.endswith("0"):
+        digits = digits[:-1]
+    scientific_exponent = decimal_position - 1
+    if -6 <= scientific_exponent < 21:
+        if decimal_position <= 0:
+            result = "0." + "0" * (-decimal_position) + digits
+        elif decimal_position >= len(digits):
+            result = digits + "0" * (decimal_position - len(digits))
+        else:
+            result = digits[:decimal_position] + "." + digits[decimal_position:]
+    else:
+        result = digits[0]
+        if len(digits) > 1:
+            result += "." + digits[1:]
+        result += "e" + ("+" if scientific_exponent >= 0 else "") + str(scientific_exponent)
+    return "-" + result if negative else result
+
+
+def _jcs_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _jcs_serialize(value: object) -> str:
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        return _jcs_number(value)
+    if isinstance(value, str):
+        return _jcs_string(value)
+    if isinstance(value, list):
+        return "[" + ",".join(_jcs_serialize(item) for item in value) + "]"
+    if isinstance(value, dict):
+        items = sorted(value.items(), key=lambda item: item[0].encode("utf-16-be"))
+        return "{" + ",".join(_jcs_string(key) + ":" + _jcs_serialize(item) for key, item in items) + "}"
+    raise SpecValidationError("value cannot be serialized as strict JSON")
+
+
 def canonical_json_bytes(value: object) -> bytes:
     _validate_json_value(value)
     try:
-        return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    except (TypeError, UnicodeEncodeError, ValueError) as exc:
-        raise SpecValidationError("value cannot be serialized as strict JSON") from exc
+        return _jcs_serialize(value).encode("utf-8")
+    except (TypeError, UnicodeEncodeError, ValueError, OverflowError) as exc:
+        raise SpecValidationError("value cannot be serialized as RFC 8785 JSON") from exc
 
 
 def digest_framed(domain: str, fields: tuple[bytes, ...]) -> str:

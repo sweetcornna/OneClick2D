@@ -1,21 +1,12 @@
 {
   "format": "oneclick2d.simple-cutout-comparator-config",
-  "format_version": "0.1.0",
+  "format_version": "0.2.0",
   "profile_id": "oc2d.spike.simple-cutout-comparator.v1",
   "required_pillow_version": "12.1.0",
-  "sequence_scope": "fixed-neutral-endpoint-combination-preflight",
-  "frames": [
-    {"id": "neutral", "parameters": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}},
-    {"id": "yaw.min", "parameters": {"head.yaw": -15, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}},
-    {"id": "yaw.max", "parameters": {"head.yaw": 15, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}},
-    {"id": "pitch.min", "parameters": {"head.yaw": 0, "head.pitch": -10, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}},
-    {"id": "pitch.max", "parameters": {"head.yaw": 0, "head.pitch": 10, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}},
-    {"id": "eye.left.closed", "parameters": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 0, "eye.right.open": 1, "mouth.open": 0}},
-    {"id": "eye.right.closed", "parameters": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 0, "mouth.open": 0}},
-    {"id": "eyes.closed", "parameters": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 0, "eye.right.open": 0, "mouth.open": 0}},
-    {"id": "mouth.max", "parameters": {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 1}},
-    {"id": "yaw.min-pitch.min", "parameters": {"head.yaw": -15, "head.pitch": -10, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}},
-    {"id": "yaw.max-eyes.closed", "parameters": {"head.yaw": 15, "head.pitch": 0, "eye.left.open": 0, "eye.right.open": 0, "mouth.open": 0}},
-    {"id": "yaw.min-pitch.max-mouth.max", "parameters": {"head.yaw": -15, "head.pitch": 10, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 1}}
-  ]
+  "frame_sequence": {
+    "format": "oneclick2d.gate-f-frame-sequence-config",
+    "format_version": "0.1.0",
+    "profile_id": "oc2d.spike.gate-f-frame-sequence.v1",
+    "seed_u64": "00000000000000000042"
+  }
 }

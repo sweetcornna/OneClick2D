@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-layered-psd/v0.1/report.schema.json",
+  "title": "OneClick2D Gate F Layered PSD Structural Preflight Report v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "profile", "width", "height", "layer_count", "raw_compression", "writer_reader_independent_modules", "icc_profile_present", "external_editor_status", "structural_preflight_pass"],
+  "properties": {
+    "format": {"const": "oneclick2d.layered-psd-preflight-report"},
+    "format_version": {"const": "0.1.0"},
+    "profile": {"const": "psd-v1-rgb8-raw-flat-layers"},
+    "width": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "height": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "layer_count": {"type": "integer", "minimum": 2, "maximum": 64},
+    "raw_compression": {"const": true},
+    "writer_reader_independent_modules": {"const": true},
+    "icc_profile_present": {"const": false},
+    "external_editor_status": {"const": "pending"},
+    "structural_preflight_pass": {"const": true}
+  }
+}

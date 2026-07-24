@@ -38,11 +38,17 @@ OneClick2D 是暂定的内部项目代号。项目探索把一张经过授权、
 python scripts/validate_docs.py
 python -m unittest discover -s tests -p "test_*.py"
 python -m spikes.gate_f_runner smoke --run-id run.local-smoke
+python -m spikes.gate_f_runner preflight --run-id run.local-technical
+python -m spikes.gate_f_runner gui
+python -m spikes.gate_f_runner model --source "C:/path/to/right-cleared.png" --run-id run.local-model
+python -m spikes.gate_f_runner motion --run-id run.local-model
 ```
 
-前两项是立项文档 lint 和单元测试；Pillow 相关测试仅在依赖存在时运行。第三项仅验证可丢弃的标准库本地 Gate F 编排骨架能以不可变输入、确定性种子和 attempt 输出生成 typed manifest；结果写入被 Git 忽略的 `workspaces/gate-f-spike/`。另有固定 Pillow 12.1.0 的真实 raster normalization Adapter 和 12 帧 simple-cutout comparator 实现预检，按显式 `raster` 命令和 run spec 运行；它们不改变当前固定 smoke 命令或生产技术栈，也不是 Gate F 计分结果。
+前两项是立项文档 lint 和单元测试；Pillow 相关测试仅在依赖存在时运行。第三项仅验证可丢弃的标准库本地 Gate F 编排骨架能以不可变输入、确定性 seed 和 attempt 输出生成 typed manifest。第四项运行 purpose-created candidate/comparator、共享 37 帧序列与 renderer、paired statistics fixture、PSD structural readback，并生成 checksummed bundle；成功只称 `LOCAL_TECHNICAL_PREFLIGHT_PASS`，始终是 `GATE_F_NOT_EVALUATED`。第五项在 `127.0.0.1:8765` 启动本地图片工作台，可显式选择固定区域 deterministic baseline，或先经锁定 Pillow 规范化再调用隔离 WSL2 worker 的 See-through V3 NF4 模型路径；模型页展示固定模型身份、输入/重建、受清单约束的语义 RGBA/深度中间图和受检 PSD。模型执行及全部产物校验成功前始终记录 `model_used: false`，成功后才记录 `true`。第六项是同一固定模型 profile 的显式 CLI 预研入口；第七项只对已通过 `source-preserve.v4` 中性保真校验的运行生成 37 帧语义 bbox quad/affine 动态研究初稿，GUI 可逐帧或播放查看。所选 supporting weight 许可元数据仍不完整，因此不分发权重、不用于生产或 Gate F 计分。结果写入被 Git 忽略的 `workspaces/gate-f-spike/`，不自动删除；GUI 路径只能称 `LOCAL_WORKBENCH_COMPLETED`，模型命令只能称 `LOCAL_MODEL_SPIKE_COMPLETED`，motion 命令只能称 `LOCAL_MODEL_MOTION_DRAFT_COMPLETED`；三者均不生成 `.oc2d`、不提供外网端点，且都是 `GATE_F_NOT_EVALUATED`。
 
-这些命令不证明 JSON Schema/package conformance、安全隔离、模型质量、拆层/补全/绑定、PSD 互操作或 Gate F 可行性。
+这些命令不证明 JSON Schema/package conformance、安全隔离、模型质量、专业拆层/补全/绑定、PSD 互操作或 Gate F 可行性。
+
+当前默认模型 profile 为 `see-through.v3.nf4.1280.wsl2.source-preserve.v4`：在深度推断后先清除每层低置信度 alpha 并线性重映射保留区间，再把原图 RGB 回填到最前可见语义层，以清理后各层最大 alpha 重建中性图，避免跨层背景噪声累积。GUI 同时展示输入/重建对照、可见像素保真指标和能力矩阵；模型结果始终是 `review_required`。未运行 `motion` 时网格、参数绑定和动态预览保持 `not_generated`；运行后仅把 bbox quad、五参数 affine binding 和动态预览标为 `research_draft`，不生成 mesh-delta、`.oc2d` 或 `.moc3`。历史 `v2` 与 `source-preserve.v3` 模型结果继续按原摘要只读验证，不会被追溯标记为应用 v4 蒙版净化。
 
 ## 许可
 

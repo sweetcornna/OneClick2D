@@ -11,7 +11,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__
 from .contracts import (
@@ -225,6 +225,7 @@ class PipelineRunner:
         run_id: str,
         source_revision: str,
         build_id: str,
+        stage_observer: Callable[[str, str, StageStatus | None], None] | None = None,
     ) -> tuple[StageStatus, Path]:
         spec, config_paths = load_run_spec(spec_path, self._registry)
         if not ID_RE.fullmatch(source_revision) or not ID_RE.fullmatch(build_id):
@@ -257,6 +258,11 @@ class PipelineRunner:
 
         try:
             for index, stage in enumerate(spec.stages):
+                if stage_observer is not None:
+                    try:
+                        stage_observer(stage.id, "started", None)
+                    except Exception:
+                        pass
                 workspace_token = CancellationToken(workspace.cancel_sentinel)
                 workspace_token.checkpoint()
                 adapter = self._registry.resolve(stage.adapter_id)
@@ -403,6 +409,11 @@ class PipelineRunner:
                 records.append(record)
                 workspace.clean_attempt(attempt, candidate, scratch)
                 active_attempt = active_candidate = active_scratch = None
+                if stage_observer is not None:
+                    try:
+                        stage_observer(stage.id, "completed", outcome.status)
+                    except Exception:
+                        pass
                 if outcome.status in {StageStatus.REVIEW, StageStatus.FALLBACK}:
                     if aggregate is StageStatus.SUCCEEDED or outcome.status is StageStatus.REVIEW:
                         aggregate = outcome.status

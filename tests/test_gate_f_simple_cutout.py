@@ -11,12 +11,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from spikes.gate_f_runner.contracts import ArtifactRef, StageContractError, StageStatus
+from spikes.gate_f_runner.frame_sequence import FRAME_COUNT, MANDATORY_TICKS
 from spikes.gate_f_runner.raster import PNG_SIGNATURE, _verify_output_png
 from spikes.gate_f_runner.runner import PipelineRunner
 from spikes.gate_f_runner.simple_cutout import (
     Affine,
-    FROZEN_CONFIG_SHA256,
-    FROZEN_FRAME_IDS,
+    FROZEN_COMPARATOR_CONFIG_SHA256,
     _build_patches,
     _feather_mask,
     _head_affine,
@@ -71,7 +71,7 @@ def normalization_config_bytes() -> bytes:
     )
 
 
-def make_fixture(root: Path, source: bytes, *, comparator_output_files: int = 13, comparator_output_bytes: int = 8388608) -> tuple[Path, Path]:
+def make_fixture(root: Path, source: bytes, *, comparator_output_files: int = 38, comparator_output_bytes: int = 8388608) -> tuple[Path, Path]:
     source_path = root / "source.png"
     source_path.write_bytes(source)
     configs = root / "configs"
@@ -132,14 +132,18 @@ def make_fixture(root: Path, source: bytes, *, comparator_output_files: int = 13
 
 
 class SimpleCutoutPureTests(unittest.TestCase):
-    def test_example_is_the_only_accepted_v1_config(self) -> None:
+    def test_example_is_the_only_accepted_v0_2_config(self) -> None:
         data = COMPARATOR_CONFIG.read_bytes()
-        frames = _parse_frozen_config(data)
-        self.assertEqual(FROZEN_CONFIG_SHA256, sha256(canonical_json_bytes(json.loads(data))).hexdigest())
-        self.assertEqual(list(FROZEN_FRAME_IDS), [frame.id for frame in frames])
+        sequence_config = _parse_frozen_config(data)
+        self.assertEqual(FROZEN_COMPARATOR_CONFIG_SHA256, sha256(canonical_json_bytes(json.loads(data))).hexdigest())
+        self.assertEqual("00000000000000000042", sequence_config.seed_u64)
         changed = json.loads(data)
-        changed["frames"][1]["parameters"]["head.yaw"] = -14
+        changed["frame_sequence"]["seed_u64"] = "00000000000000000043"
         with self.assertRaisesRegex(Exception, "frozen v1 profile"):
+            _parse_frozen_config(canonical_json_bytes(changed))
+        changed = json.loads(data)
+        changed["format_version"] = "0.1.0"
+        with self.assertRaisesRegex(Exception, "unsupported simple-cutout config version"):
             _parse_frozen_config(canonical_json_bytes(changed))
 
     def test_odd_canvas_boxes_use_outward_half_open_rounding(self) -> None:
@@ -257,7 +261,7 @@ class SimpleCutoutAdapterTests(unittest.TestCase):
         if PIL.__version__ != "12.1.0":
             raise unittest.SkipTest("functional comparator tests require locked Pillow 12.1.0")
 
-    def _run(self, *, run_id: str, output_files: int = 13, output_bytes: int = 8388608) -> tuple[StageStatus, dict[str, object], Path]:
+    def _run(self, *, run_id: str, output_files: int = 38, output_bytes: int = 8388608) -> tuple[StageStatus, dict[str, object], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -284,7 +288,7 @@ class SimpleCutoutAdapterTests(unittest.TestCase):
         self.assertEqual(["stage.raster-normalize", "stage.simple-cutout-comparator"], [stage["id"] for stage in first["stages"]])
         first_outputs = first["stages"][1]["outputs"]
         second_outputs = second["stages"][1]["outputs"]
-        self.assertEqual(13, len(first_outputs))
+        self.assertEqual(FRAME_COUNT + 1, len(first_outputs))
         self.assertEqual([item["sha256"] for item in first_outputs], [item["sha256"] for item in second_outputs])
 
         normalized = next(item for item in first["stages"][0]["outputs"] if item["role"] == "normalized_raster")
@@ -295,9 +299,13 @@ class SimpleCutoutAdapterTests(unittest.TestCase):
 
         report = json.loads((first_path.parent / first["result"]["uri"]).read_text(encoding="utf-8"))
         self.assertEqual(normalized["sha256"], report["input"]["normalized_raster_sha256"])
-        self.assertEqual(list(FROZEN_FRAME_IDS), [frame["id"] for frame in report["frames"]])
+        mandatory_ids = [frame_id for frame_id, _ in MANDATORY_TICKS]
+        self.assertEqual(mandatory_ids, [frame["id"] for frame in report["frames"][:12]])
+        self.assertEqual([f"trajectory.{index:03d}" for index in range(25)], [frame["id"] for frame in report["frames"][12:]])
+        self.assertEqual("2b9c10df115be77ff3eb17807329a016d1350a3d387ea47bdaab2dd409b0ea8c", report["sequence"]["sha256"])
+        self.assertEqual(FRAME_COUNT, report["sequence"]["frame_count"])
         self.assertFalse(any(report["claims"].values()))
-        self.assertFalse(report["randomness_used"])
+        self.assertTrue(report["randomness_used"])
 
         from io import BytesIO
         from PIL import Image, ImageChops
@@ -314,7 +322,7 @@ class SimpleCutoutAdapterTests(unittest.TestCase):
         self.assertLess((right_box[0] + right_box[2]) / 2, 50)  # type: ignore[index]
 
     def test_output_file_limit_leaves_no_comparator_commit(self) -> None:
-        status, manifest, manifest_path = self._run(run_id="run.comparator-limit", output_files=1)
+        status, manifest, manifest_path = self._run(run_id="run.comparator-limit", output_files=37)
         self.assertEqual(StageStatus.FAILED, status)
         self.assertEqual("STAGE_RESOURCE_LIMIT_EXCEEDED", manifest["terminal_reason_code"])
         self.assertFalse((manifest_path.parent / "committed" / "stage.simple-cutout-comparator").exists())

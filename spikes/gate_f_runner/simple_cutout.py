@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import math
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
@@ -19,83 +18,31 @@ from .contracts import (
     StageOutcome,
     StageStatus,
 )
+from .frame_sequence import (
+    ALGORITHM_ID,
+    FRAME_COUNT,
+    MANDATORY_FRAME_COUNT,
+    PARAMETER_ORDER,
+    PARAMETER_SCALE,
+    PROFILE_ID,
+    TRAJECTORY_FRAME_COUNT,
+    GateFFrame,
+    GateFFrameSequenceConfig,
+    build_gate_f_frame_sequence,
+    parse_gate_f_frame_sequence_config,
+)
 from .raster import RasterBlocked, _load_pillow, _verify_output_png, build_raster_registry
+from .rendering import Affine, RENDERER_CONTRACT_ID, RENDERER_PROFILE_ID, RenderLayer, render_rgba_layers, write_rgba_png
 from .runner import AdapterRegistry
 from .runtime import canonical_json_bytes, sha256_bytes, strict_load_json_bytes
 
-PARAMETER_ORDER = (
-    "head.yaw",
-    "head.pitch",
-    "eye.left.open",
-    "eye.right.open",
-    "mouth.open",
-)
 PATCH_SPECS = (
     ("head", None, "not-applicable", (20, 5, 80, 60)),
     ("eye.screen-left", "eye.right.open", "right", (27, 25, 47, 40)),
     ("eye.screen-right", "eye.left.open", "left", (53, 25, 73, 40)),
     ("mouth", "mouth.open", "not-applicable", (40, 42, 60, 56)),
 )
-FROZEN_CONFIG_SHA256 = "4e14dfab2fc3b284363a614111c0a6a677b288ae839d72b7d0eaf4b004217e47"
-FROZEN_FRAME_IDS = (
-    "neutral",
-    "yaw.min",
-    "yaw.max",
-    "pitch.min",
-    "pitch.max",
-    "eye.left.closed",
-    "eye.right.closed",
-    "eyes.closed",
-    "mouth.max",
-    "yaw.min-pitch.min",
-    "yaw.max-eyes.closed",
-    "yaw.min-pitch.max-mouth.max",
-)
-
-
-@dataclass(frozen=True)
-class Affine:
-    a: Fraction
-    b: Fraction
-    c: Fraction
-    d: Fraction
-    e: Fraction
-    f: Fraction
-
-    @classmethod
-    def identity(cls) -> "Affine":
-        return cls(Fraction(1), Fraction(0), Fraction(0), Fraction(0), Fraction(1), Fraction(0))
-
-    def compose(self, inner: "Affine") -> "Affine":
-        """Return this transform applied after ``inner``."""
-        return Affine(
-            self.a * inner.a + self.b * inner.d,
-            self.a * inner.b + self.b * inner.e,
-            self.a * inner.c + self.b * inner.f + self.c,
-            self.d * inner.a + self.e * inner.d,
-            self.d * inner.b + self.e * inner.e,
-            self.d * inner.c + self.e * inner.f + self.f,
-        )
-
-    def inverse_tuple(self) -> tuple[float, float, float, float, float, float]:
-        determinant = self.a * self.e - self.b * self.d
-        if determinant == 0:
-            raise StageContractError("simple-cutout transform is not invertible")
-        values = (
-            self.e / determinant,
-            -self.b / determinant,
-            (self.b * self.f - self.e * self.c) / determinant,
-            -self.d / determinant,
-            self.a / determinant,
-            (self.d * self.c - self.a * self.f) / determinant,
-        )
-        result = tuple(float(value) for value in values)
-        if not all(math.isfinite(value) for value in result):
-            raise StageContractError("simple-cutout transform is not finite")
-        return result
-
-    def map_point(self, x: Fraction, y: Fraction) -> tuple[Fraction, Fraction]:
-        return self.a * x + self.b * y + self.c, self.d * x + self.e * y + self.f
+FROZEN_COMPARATOR_CONFIG_SHA256 = "9d4cc332659b00b677885d9b65b83f86b1444753296194eb0e6b2bdc83c4af76"
 
 
 @dataclass(frozen=True)
@@ -112,27 +59,21 @@ class Patch:
         return Fraction(left + right, 2), Fraction(top + bottom, 2)
 
 
-@dataclass(frozen=True)
-class Frame:
-    id: str
-    parameters: dict[str, int]
-
-
-def _parse_frozen_config(data: bytes) -> tuple[Frame, ...]:
+def _parse_frozen_config(data: bytes) -> GateFFrameSequenceConfig:
     value = strict_load_json_bytes(data)
-    if sha256_bytes(canonical_json_bytes(value)) != FROZEN_CONFIG_SHA256:
+    if not isinstance(value, dict) or value.get("format_version") != "0.2.0":
+        raise StageContractError("unsupported simple-cutout config version")
+    if sha256_bytes(canonical_json_bytes(value)) != FROZEN_COMPARATOR_CONFIG_SHA256:
         raise StageContractError("simple-cutout config does not match frozen v1 profile")
-    if not isinstance(value, dict) or not isinstance(value.get("frames"), list):
+    keys = {"format", "format_version", "profile_id", "required_pillow_version", "frame_sequence"}
+    if (
+        set(value) != keys
+        or value["format"] != "oneclick2d.simple-cutout-comparator-config"
+        or value["profile_id"] != "oc2d.spike.simple-cutout-comparator.v1"
+        or value["required_pillow_version"] != "12.1.0"
+    ):
         raise StageContractError("simple-cutout config is invalid")
-    frames: list[Frame] = []
-    for expected_id, item in zip(FROZEN_FRAME_IDS, value["frames"], strict=True):
-        if not isinstance(item, dict) or item.get("id") != expected_id or not isinstance(item.get("parameters"), dict):
-            raise StageContractError("simple-cutout config is invalid")
-        parameters = item["parameters"]
-        if tuple(parameters) != PARAMETER_ORDER:
-            raise StageContractError("simple-cutout config is invalid")
-        frames.append(Frame(expected_id, dict(parameters)))
-    return tuple(frames)
+    return parse_gate_f_frame_sequence_config(value["frame_sequence"])
 
 
 def _resolve_box(percent_xyxy: tuple[int, int, int, int], width: int, height: int) -> tuple[int, int, int, int]:
@@ -154,7 +95,7 @@ def _build_patches(width: int, height: int) -> tuple[Patch, ...]:
     )
 
 
-def _head_affine(parameters: dict[str, int], width: int, height: int, pivot_y: Fraction) -> Affine:
+def _head_affine(parameters: dict[str, Fraction], width: int, height: int, pivot_y: Fraction) -> Affine:
     yaw = Fraction(parameters["head.yaw"], 15)
     pitch = Fraction(parameters["head.pitch"], 10)
     shear = Fraction(3, 100) * yaw
@@ -167,7 +108,7 @@ def _scale_y_affine(scale: Fraction, pivot_y: Fraction) -> Affine:
     return Affine(Fraction(1), Fraction(0), Fraction(0), Fraction(0), scale, (Fraction(1) - scale) * pivot_y)
 
 
-def _patch_affine(patch: Patch, parameters: dict[str, int], head: Affine) -> Affine:
+def _patch_affine(patch: Patch, parameters: dict[str, Fraction], head: Affine) -> Affine:
     if patch.id == "head":
         return head
     if patch.id.startswith("eye."):
@@ -179,7 +120,7 @@ def _patch_affine(patch: Patch, parameters: dict[str, int], head: Affine) -> Aff
     return head.compose(local)
 
 
-def _patch_is_active(patch: Patch, parameters: dict[str, int]) -> bool:
+def _patch_is_active(patch: Patch, parameters: dict[str, Fraction]) -> bool:
     if patch.id == "head":
         return parameters["head.yaw"] != 0 or parameters["head.pitch"] != 0
     if patch.id.startswith("eye."):
@@ -225,59 +166,23 @@ def _render_frame(
     source: Any,
     layers: dict[str, Any],
     patches: tuple[Patch, ...],
-    frame: Frame,
+    frame: GateFFrame,
     backend: Any,
     context: StageContext,
 ) -> Any:
-    result = source.copy()
-    head = _head_affine(frame.parameters, source.width, source.height, patches[0].pivot[1])
-    for patch in patches:
-        context.cancellation.checkpoint()
-        if not _patch_is_active(patch, frame.parameters):
-            continue
-        transform = _patch_affine(patch, frame.parameters, head)
-        if transform == Affine.identity():
-            continue
-        inverse = transform.inverse_tuple()
-        left, top, _, _ = patch.box
-        local_inverse = (
-            inverse[0],
-            inverse[1],
-            inverse[2] - left,
-            inverse[3],
-            inverse[4],
-            inverse[5] - top,
-        )
-        transformed = layers[patch.id].transform(
-            source.size,
-            backend.Image.Transform.AFFINE,
-            local_inverse,
-            resample=backend.Image.Resampling.BILINEAR,
-            fillcolor=(0, 0, 0, 0),
-        )
-        result.alpha_composite(transformed)
-        transformed.close()
-    return result
+    parameters = frame.parameter_fractions()
+    head = _head_affine(parameters, source.width, source.height, patches[0].pivot[1])
+    render_layers = (
+        RenderLayer(layers[patch.id], patch.box, _patch_affine(patch, parameters, head))
+        for patch in patches
+        if _patch_is_active(patch, parameters)
+    )
+    return render_rgba_layers(source, render_layers, backend, context)
 
 
 def _write_frame(image: Any, index: int, frame_id: str, context: StageContext, backend: Any) -> tuple[str, ArtifactRef]:
     name = f"frame.{index:03d}.{frame_id}.png"
-    writer = context.sink.open_binary(name, role="simple_cutout_frame", media_type="image/png")
-    pnginfo = backend.PngImagePlugin.PngInfo()
-    pnginfo.add(b"sRGB", b"\x00")
-    with writer:
-        image.save(
-            writer,
-            format="PNG",
-            optimize=False,
-            compress_level=9,
-            pnginfo=pnginfo,
-            icc_profile=None,
-            exif=b"",
-        )
-    artifact = writer.artifact
-    _verify_output_png(artifact.path.read_bytes(), image.size)
-    return name, artifact
+    return name, write_rgba_png(image, name, "simple_cutout_frame", context, backend)
 
 
 def _select_inputs(context: StageContext) -> tuple[ArtifactRef, ArtifactRef]:
@@ -378,7 +283,7 @@ class SimpleCutoutComparatorAdapter:
     adapter_id = "simple-cutout.comparator.pillow.v1"
     contract_id = "oc2d.spike.simple-cutout-comparator.v1"
     stage_type = "oc2d.spike.simple-cutout-comparator"
-    implementation_version = "0.1.0"
+    implementation_version = "0.2.0"
     execution_profile = "python-pillow-12.1.0-in-process-v1"
     execution_provider = "pillow-12.1.0"
     producer_kind = ProducerKind.DETERMINISTIC
@@ -389,7 +294,8 @@ class SimpleCutoutComparatorAdapter:
         source = None
         layers: dict[str, Any] = {}
         try:
-            frames = _parse_frozen_config(context.spec.config_bytes)
+            sequence_config = _parse_frozen_config(context.spec.config_bytes)
+            sequence = build_gate_f_frame_sequence(sequence_config)
             raster, normalization_report = _select_inputs(context)
             report_value, width, height = _validate_normalized_report(raster, normalization_report)
             raster_data = raster.path.read_bytes()
@@ -406,7 +312,7 @@ class SimpleCutoutComparatorAdapter:
             layers = _prepare_layers(source, patches, backend)
             outputs: list[ArtifactRef] = []
             frame_reports: list[dict[str, object]] = []
-            for index, frame in enumerate(frames):
+            for index, frame in enumerate(sequence.frames):
                 context.cancellation.checkpoint()
                 rendered = _render_frame(source, layers, patches, frame, backend, context)
                 try:
@@ -418,7 +324,8 @@ class SimpleCutoutComparatorAdapter:
                     {
                         "index": index,
                         "id": frame.id,
-                        "parameters": frame.parameters,
+                        "source": frame.source,
+                        "parameters": frame.parameter_document(),
                         "artifact": {
                             "name": name,
                             "role": artifact.role,
@@ -431,15 +338,26 @@ class SimpleCutoutComparatorAdapter:
             context.cancellation.checkpoint()
             report_document = {
                 "format": "oneclick2d.simple-cutout-comparator-report",
-                "format_version": "0.1.0",
+                "format_version": "0.2.0",
                 "scope": "disposable-gate-f-spike",
                 "adapter_id": self.adapter_id,
                 "adapter_version": self.implementation_version,
                 "contract_id": self.contract_id,
                 "config_sha256": context.spec.stage.config_sha256,
-                "seed_u64": context.spec.seed_u64,
-                "randomness_used": False,
-                "sequence_scope": "fixed-neutral-endpoint-combination-preflight",
+                "stage_seed_u64": context.spec.seed_u64,
+                "randomness_used": True,
+                "sequence_scope": "mandatory-neutral-endpoint-combination-seeded-trajectory",
+                "sequence": {
+                    "profile_id": PROFILE_ID,
+                    "algorithm_id": ALGORITHM_ID,
+                    "config_sha256": sequence_config.canonical_sha256,
+                    "seed_u64": sequence.seed_u64,
+                    "sha256": sequence.sha256,
+                    "parameter_scale": PARAMETER_SCALE,
+                    "mandatory_frame_count": MANDATORY_FRAME_COUNT,
+                    "trajectory_frame_count": TRAJECTORY_FRAME_COUNT,
+                    "frame_count": FRAME_COUNT,
+                },
                 "input": {
                     "normalized_raster_sha256": raster.sha256,
                     "normalization_report_sha256": normalization_report.sha256,
@@ -464,6 +382,8 @@ class SimpleCutoutComparatorAdapter:
                     for patch in patches
                 ],
                 "rendering": {
+                    "contract_id": RENDERER_CONTRACT_ID,
+                    "profile_id": RENDERER_PROFILE_ID,
                     "coordinate_origin": "top-left",
                     "rectangle_quantization": "floor-min-ceil-max-half-open",
                     "pivot": "resolved-box-center",

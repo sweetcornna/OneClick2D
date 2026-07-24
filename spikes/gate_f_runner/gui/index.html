@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="OneClick2D 本地图片生成预研工作台">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='6' width='20' height='20' rx='2' fill='%2310242d' transform='rotate(45 16 16)'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23006e9b'/%3E%3C/svg%3E">
+  <title>OneClick2D · Image Workbench</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div class="ambient" aria-hidden="true"></div>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="OneClick2D 图片工作台首页">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span><strong>OneClick2D</strong><small>本地图片工作台</small></span>
+    </a>
+    <div class="masthead-actions">
+      <span class="truth-badge" title="Gate F 尚未评估">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.8 20h18.4L12 3Zm0 5.5v5m0 3v.5"/></svg>
+        GATE_F_NOT_EVALUATED
+      </span>
+      <button class="icon-button" id="theme-toggle" type="button" aria-label="切换明暗主题" title="切换明暗主题">
+        <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
+        <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8 8 0 0 1 9.5 3.5 8.5 8.5 0 1 0 20.5 14.5Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main" class="shell">
+    <section class="intake" aria-labelledby="page-title">
+      <div class="intake-heading">
+        <h1 id="page-title">图片拆层工作台</h1>
+        <div class="boundary-line" role="note">
+          <b id="workflow-boundary">快速基线 · 非模型</b>
+          <span id="workflow-profile">See-through 模型可选</span>
+          <span>不生成 .oc2d</span>
+        </div>
+      </div>
+
+      <form id="source-form" class="source-form">
+        <fieldset class="workflow-switch">
+          <legend>处理方式</legend>
+          <label><input type="radio" name="workflow" value="baseline" checked><span>快速基线</span></label>
+          <label><input type="radio" name="workflow" value="model"><span>See-through 模型</span></label>
+        </fieldset>
+        <p id="model-notice" class="model-notice" hidden>固定 NF4 profile · 权重许可元数据待补齐 · 本机约 10 分钟</p>
+        <input id="source-file" class="sr-only" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg">
+        <label id="drop-zone" class="drop-zone" for="source-file" tabindex="0">
+          <span class="drop-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 15v4h16v-4"/></svg></span>
+          <strong>拖入 PNG/JPEG</strong>
+          <span>或选择文件</span>
+        </label>
+        <figure id="source-preview" class="source-preview" hidden>
+          <img id="source-image" alt="已选择的本地图片">
+          <figcaption id="source-meta"></figcaption>
+          <button id="replace-file" class="text-button" type="button">更换图片</button>
+        </figure>
+        <label class="rights-check">
+          <input id="rights-confirmation" type="checkbox">
+          <span>我确认这是权利明确的本地测试素材</span>
+        </label>
+        <button id="run-button" class="primary-button" type="submit" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg>
+          <span id="run-button-label">生成 37 帧预览</span>
+        </button>
+        <p id="run-status" class="run-status" role="status" aria-live="polite">选择一张图片。</p>
+        <p id="run-error" class="run-error" role="alert" tabindex="-1" hidden></p>
+      </form>
+    </section>
+
+    <section class="session-bar" aria-label="本地运行选择">
+      <label for="run-select">本地运行</label>
+      <select id="run-select"><option value="">暂无运行</option></select>
+      <span>文件和结果保存在本机工作区，当前不会自动删除。</span>
+    </section>
+
+    <section id="pipeline" class="pipeline" aria-labelledby="pipeline-title">
+      <header class="section-title">
+        <h2 id="pipeline-title">处理过程</h2>
+        <strong id="pipeline-state">待运行</strong>
+      </header>
+      <ol id="phase-list" class="phase-list"></ol>
+    </section>
+
+    <section id="workbench" class="workbench" hidden aria-label="生成结果">
+      <section class="result-panel" aria-labelledby="result-title">
+        <header class="panel-title">
+          <div><h2 id="result-title">最终预览</h2><span id="result-subtitle">固定区域变形 · 非模型</span></div>
+          <span id="frame-source" class="tag">MANDATORY</span>
+        </header>
+        <div id="model-view-switch" class="model-view-switch" role="group" aria-label="模型结果视图" hidden>
+          <button type="button" data-model-view="source" aria-pressed="false">输入证据</button>
+          <button type="button" data-model-view="reconstruction" aria-pressed="true">静态重建</button>
+          <button type="button" data-model-view="motion" aria-pressed="false" hidden>动态初稿</button>
+          <button type="button" data-model-view="camera" aria-pressed="false" hidden>摄像头驱动</button>
+        </div>
+        <figure class="result-stage">
+          <div class="preview-surface">
+            <img id="result-frame" alt="生成结果当前帧">
+            <canvas id="live-canvas" width="1280" height="1280" aria-label="摄像头驱动动态模型预览" hidden></canvas>
+            <div id="camera-pip" class="camera-pip" hidden>
+              <video id="camera-video" autoplay muted playsinline aria-label="本地摄像头画面"></video>
+              <span>CAMERA · LOCAL</span>
+            </div>
+            <div id="live-stage-status" class="live-stage-status" data-state="idle" hidden>
+              <i aria-hidden="true"></i><span>尚未加载</span>
+            </div>
+          </div>
+          <figcaption><b id="frame-id">neutral</b><span id="frame-count">001 / 037</span></figcaption>
+        </figure>
+        <section id="live-controls" class="live-controls" aria-label="摄像头驱动控制" hidden>
+          <div class="live-actions">
+            <button id="camera-start" class="camera-start" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4 16 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3l1.5-3h5Z"/><circle cx="12" cy="13" r="3"/></svg>
+              <span>开启摄像头</span>
+            </button>
+            <button id="camera-stop" class="camera-icon-button" type="button" aria-label="关闭摄像头" title="关闭摄像头" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12"/></svg>
+            </button>
+            <button id="camera-calibrate" class="camera-icon-button" type="button" aria-label="重新校准" title="重新校准" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/><circle cx="12" cy="12" r="5"/></svg>
+            </button>
+            <label class="camera-device-control" for="camera-device"><span>摄像头</span><select id="camera-device"><option value="">默认摄像头</option></select></label>
+            <label class="camera-preview-toggle"><input id="camera-preview-toggle" type="checkbox" checked><span>摄像头画面</span></label>
+          </div>
+          <div class="tracking-readout" aria-live="polite">
+            <strong id="tracking-state" data-state="idle">尚未加载</strong>
+            <span id="tracking-fps">0.0 FPS</span>
+          </div>
+          <dl class="live-parameters" aria-label="实时模型参数">
+            <div><dt>头部左右</dt><dd id="param-head-yaw">0.0°</dd><meter id="meter-head-yaw" min="-15" max="15" value="0"></meter></div>
+            <div><dt>头部俯仰</dt><dd id="param-head-pitch">0.0°</dd><meter id="meter-head-pitch" min="-10" max="10" value="0"></meter></div>
+            <div><dt>左眼</dt><dd id="param-eye-left">100%</dd><meter id="meter-eye-left" min="0" max="1" value="1"></meter></div>
+            <div><dt>右眼</dt><dd id="param-eye-right">100%</dd><meter id="meter-eye-right" min="0" max="1" value="1"></meter></div>
+            <div><dt>嘴部</dt><dd id="param-mouth">0%</dd><meter id="meter-mouth" min="0" max="1" value="0"></meter></div>
+          </dl>
+        </section>
+        <section id="model-quality" class="model-quality" aria-labelledby="model-quality-title" hidden>
+          <header><h3 id="model-quality-title">质量判定</h3><strong id="model-quality-state">待人工复核</strong></header>
+          <dl id="model-quality-facts" class="model-quality-facts"></dl>
+          <h3 id="model-capability-title">产物能力</h3>
+          <ul id="model-capabilities" class="model-capabilities" aria-labelledby="model-capability-title"></ul>
+        </section>
+        <dl id="model-identity" class="model-identity" hidden></dl>
+        <div id="playback-controls" class="playback" role="group" aria-label="预览帧控制">
+          <button id="prev-frame" type="button" aria-label="上一帧"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+          <button id="play-toggle" type="button" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path class="play-shape" d="m8 5 11 7-11 7V5Z"/><path class="pause-shape" d="M8 5v14m8-14v14"/></svg><span>播放</span></button>
+          <button id="next-frame" type="button" aria-label="下一帧"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
+          <label for="frame-slider">帧</label>
+          <input id="frame-slider" type="range" min="0" max="36" value="0">
+        </div>
+        <div id="filmstrip" class="filmstrip" role="listbox" aria-label="37 帧" aria-orientation="horizontal"></div>
+      </section>
+
+      <aside class="artifact-panel" aria-labelledby="artifact-title">
+        <header class="panel-title">
+          <div><h2 id="artifact-title">中间结果</h2><span id="artifact-stage">栅格标准化</span></div>
+          <label id="depth-control" class="depth-control" hidden><input id="depth-toggle" type="checkbox"><span>深度图</span></label>
+        </header>
+        <nav id="artifact-tabs" class="artifact-tabs" aria-label="中间结果选择"></nav>
+        <figure class="artifact-view">
+          <img id="artifact-image" alt="当前中间结果">
+          <figcaption id="artifact-caption"></figcaption>
+        </figure>
+        <dl id="artifact-facts" class="fact-list"></dl>
+        <section class="output-actions" aria-labelledby="output-title">
+          <h3 id="output-title">输出</h3>
+          <a id="download-psd" class="secondary-button" download="local-deterministic-baseline.psd">下载 PSD</a>
+          <a id="download-depth-psd" class="secondary-button" download="local-see-through-depth.psd" hidden>下载深度 PSD</a>
+          <span id="output-status">结构回读通过 · 未经外部编辑器验证</span>
+          <span id="output-boundary">.oc2d 尚未实现</span>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

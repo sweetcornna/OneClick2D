@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-acceptance-bundle/v0.1/report.schema.json",
+  "title": "OneClick2D Gate F Local Technical Preflight Acceptance v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "local_technical_preflight_status", "ready_for_activated_scoring", "gate_f_status", "arm_parity_pass", "paired_evaluator_fixture_pass", "psd_structural_preflight_pass", "icc_profile_present", "external_editor_status", "artifact_count"],
+  "properties": {
+    "format": {"const": "oneclick2d.gate-f-technical-preflight-acceptance"},
+    "format_version": {"const": "0.1.0"},
+    "local_technical_preflight_status": {"enum": ["LOCAL_TECHNICAL_PREFLIGHT_PASS", "LOCAL_TECHNICAL_PREFLIGHT_FAIL"]},
+    "ready_for_activated_scoring": {"const": false},
+    "gate_f_status": {"const": "GATE_F_NOT_EVALUATED"},
+    "arm_parity_pass": {"type": "boolean"},
+    "paired_evaluator_fixture_pass": {"type": "boolean"},
+    "psd_structural_preflight_pass": {"type": "boolean"},
+    "icc_profile_present": {"const": false},
+    "external_editor_status": {"const": "pending"},
+    "artifact_count": {"type": "integer", "minimum": 5}
+  }
+}

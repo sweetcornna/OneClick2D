@@ -1,0 +1,820 @@
+"""Isolated subprocess bridge for disposable local model spikes."""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import math
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+from pathlib import Path
+
+from .contracts import StageContractError
+from .model_psd_validator import ModelPsdStructure, validate_model_psd
+from .runtime import canonical_json_bytes, read_bounded_file, sha256_bytes, strict_load_json_bytes
+
+PROFILE_ROOT = Path(__file__).with_name("model_profiles")
+ENTRYPOINT_ROOT = Path(__file__).with_name("model_entrypoints")
+PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v4"
+PROFILE_PATH = PROFILE_ROOT / "see-through-v3-nf4.json"
+LEGACY_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.v2"
+LEGACY_PROFILE_SHA256 = "14577459cc2e33aba3c0e74fd13f134aecfaaf45bb8acae96112182aa8239e35"
+LEGACY_ENTRYPOINT_SHA256 = "63a192527599ddb567589a6515d7631399df2b11d67c004cf4cc1898000f2a58"
+LEGACY_DEPENDENCIES_SHA256 = "dac624bb1f3644734fce4f67a14b54bf54241a8719aa2ff829bc3e77961fe1d5"
+LEGACY_UPSTREAM_COMMIT = "58a1cb11d13f85acec9bbddb8cd4b6487843d4cf"
+LEGACY_SOURCE_PRESERVE_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v3"
+LEGACY_SOURCE_PRESERVE_PROFILE_SHA256 = "990b2561bb2067e3838aedf1751d9a86a06e6dfc985aad92189ec9fda387ec83"
+LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256 = "6b625faa99022f6edfa5faba97b23054331b9276501e2b02953cb783f357ec71"
+SOURCE_PRESERVE_ALGORITHM_ID = "source-visible-rgb-by-depth-mask-clean.v2"
+MAX_MODEL_STDIO_BYTES = 2 * 1024 * 1024
+MAX_MODEL_RESULT_BYTES = 512 * 1024 * 1024
+MAX_MODEL_PNG_BYTES = 64 * 1024 * 1024
+MODEL_PART_NAMES = (
+    "front hair",
+    "back hair",
+    "headwear",
+    "face",
+    "eyebrow",
+    "eyelash",
+    "irides",
+    "eyewhite",
+    "eyewear",
+    "ears",
+    "earwear",
+    "nose",
+    "mouth",
+    "neck",
+    "neckwear",
+    "topwear",
+    "handwear",
+    "bottomwear",
+    "legwear",
+    "footwear",
+    "tail",
+    "wings",
+    "objects",
+)
+MODEL_SEMANTIC_NAMES = (*MODEL_PART_NAMES[:2], "head", *MODEL_PART_NAMES[2:])
+MODEL_STATS_KEYS = (
+    "peak_vram_gb",
+    "layerdiff_time_s",
+    "marigold_time_s",
+    "psd_time_s",
+    "total_time_s",
+)
+RUNTIME_PACKAGE_NAMES = (
+    "accelerate",
+    "bitsandbytes",
+    "diffusers",
+    "einops",
+    "huggingface-hub",
+    "kornia",
+    "matplotlib",
+    "numpy",
+    "opencv-python",
+    "pillow",
+    "psd-tools",
+    "pyyaml",
+    "safetensors",
+    "scikit-image",
+    "scikit-learn",
+    "scipy",
+    "timm",
+    "torch",
+    "torchaudio",
+    "torchvision",
+    "transformers",
+)
+RUNTIME_ATTESTATION_CODE = """import importlib.metadata as m,json,platform,torch
+names=json.loads(__import__('os').environ['ONECLICK2D_PACKAGE_NAMES'])
+result={'python':platform.python_version(),'torch':torch.__version__,'cuda':torch.version.cuda,'cuda_available':torch.cuda.is_available(),'packages':{name:m.version(name) for name in names}}
+try:
+ result['timm_direct_url']=json.loads(m.distribution('timm').read_text('direct_url.json') or 'null')
+except (FileNotFoundError,TypeError,ValueError):
+ result['timm_direct_url']=None
+print(json.dumps(result,sort_keys=True,separators=(',',':')))
+"""
+
+
+def _load_profile() -> tuple[dict[str, object], bytes]:
+    exact = read_bounded_file(PROFILE_PATH, 256 * 1024)
+    profile = strict_load_json_bytes(exact)
+    if not isinstance(profile, dict) or profile.get("profile_id") != PROFILE_ID:
+        raise StageContractError("model spike profile is invalid")
+    return profile, exact
+
+
+def _wsl_path(path: Path, distribution: str) -> str:
+    completed = _run_checked(
+        ["wsl.exe", "-d", distribution, "--", "wslpath", "-a", path.resolve().as_posix()],
+        timeout=30,
+        output_limit=32 * 1024,
+    )
+    if completed.returncode != 0 or len(completed.stdout) > 32 * 1024:
+        raise StageContractError("model worker path translation failed")
+    value = completed.stdout.decode("utf-8", errors="strict").strip()
+    if not value.startswith("/mnt/"):
+        raise StageContractError("model worker path is outside the mounted workspace")
+    return value
+
+
+def _runtime(profile: dict[str, object]) -> tuple[str, str, str]:
+    runtime = profile.get("runtime")
+    if not isinstance(runtime, dict):
+        raise StageContractError("model worker runtime profile is invalid")
+    distribution = runtime.get("distribution")
+    root = runtime.get("code_root_relative_to_home")
+    python = runtime.get("python_relative_to_code_root")
+    if not all(isinstance(value, str) and value for value in (distribution, root, python)):
+        raise StageContractError("model worker runtime identity is invalid")
+    if any(".." in Path(value).parts for value in (root, python)):
+        raise StageContractError("model worker runtime path is invalid")
+    return distribution, root, python
+
+
+def _validated_entrypoint(profile: dict[str, object]) -> Path:
+    entrypoint = profile.get("entrypoint")
+    if not isinstance(entrypoint, dict) or set(entrypoint) != {"path", "sha256", "upstream_script"}:
+        raise StageContractError("model entrypoint profile is invalid")
+    relative = entrypoint.get("path")
+    expected_digest = entrypoint.get("sha256")
+    upstream_script = entrypoint.get("upstream_script")
+    if (
+        not isinstance(relative, str)
+        or Path(relative).name != relative
+        or not isinstance(expected_digest, str)
+        or len(expected_digest) != 64
+        or any(character not in "0123456789abcdef" for character in expected_digest)
+        or upstream_script != "inference/scripts/inference_psd_quantized.py"
+    ):
+        raise StageContractError("model entrypoint identity is invalid")
+    path = ENTRYPOINT_ROOT / relative
+    exact = read_bounded_file(path, 256 * 1024)
+    if sha256_bytes(exact) != expected_digest:
+        raise StageContractError("model entrypoint digest mismatch")
+    return path
+
+
+def _run_checked(
+    command: list[str],
+    *,
+    timeout: int,
+    output_limit: int = 4096,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    streams = ((process.stdout, bytearray()), (process.stderr, bytearray()))
+    exceeded = threading.Event()
+
+    def drain(stream: object, buffer: bytearray) -> None:
+        while True:
+            chunk = stream.read(64 * 1024)  # type: ignore[attr-defined]
+            if not chunk:
+                return
+            if len(buffer) + len(chunk) > output_limit:
+                remaining = max(0, output_limit + 1 - len(buffer))
+                buffer.extend(chunk[:remaining])
+                exceeded.set()
+                process.kill()
+                return
+            buffer.extend(chunk)
+
+    threads = [threading.Thread(target=drain, args=item, daemon=True) for item in streams]
+    for thread in threads:
+        thread.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        for thread in threads:
+            thread.join()
+        for stream, _ in streams:
+            stream.close()  # type: ignore[attr-defined]
+        raise StageContractError("isolated model command timed out") from exc
+    for thread in threads:
+        thread.join()
+    for stream, _ in streams:
+        stream.close()  # type: ignore[attr-defined]
+    if exceeded.is_set():
+        raise StageContractError("isolated model command output exceeded its bound")
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        stdout=bytes(streams[0][1]),
+        stderr=bytes(streams[1][1]),
+    )
+
+
+def _runtime_versions(runtime: dict[str, object]) -> dict[str, str]:
+    versions = runtime.get("versions")
+    if not isinstance(versions, dict) or set(versions) != set(RUNTIME_PACKAGE_NAMES):
+        raise StageContractError("model dependency identity is invalid")
+    result: dict[str, str] = {}
+    for name in RUNTIME_PACKAGE_NAMES:
+        version = versions.get(name)
+        if not isinstance(version, str) or not version:
+            raise StageContractError("model dependency version is invalid")
+        result[name] = version
+    return result
+
+
+def _verify_runtime(profile: dict[str, object], dependencies_sha256: str) -> None:
+    distribution, root, python = _runtime(profile)
+    runtime = profile.get("runtime")
+    if not isinstance(runtime, dict):
+        raise StageContractError("model worker runtime profile is invalid")
+    if dependencies_sha256 != runtime.get("dependencies_sha256"):
+        raise StageContractError("model dependency profile mismatch")
+    expected = {
+        "python": runtime.get("python_version"),
+        "torch": runtime.get("torch_version"),
+        "cuda": runtime.get("cuda_version"),
+        "packages": _runtime_versions(runtime),
+    }
+    if not all(isinstance(expected[key], str) and expected[key] for key in ("python", "torch", "cuda")):
+        raise StageContractError("model runtime version identity is invalid")
+    command = [
+        "wsl.exe",
+        "-d",
+        distribution,
+        "--cd",
+        f"~/{root}",
+        "--",
+        "env",
+        f"ONECLICK2D_PACKAGE_NAMES={json.dumps(RUNTIME_PACKAGE_NAMES, separators=(',', ':'))}",
+        f"./{python}",
+        "-c",
+        RUNTIME_ATTESTATION_CODE,
+    ]
+    completed = _run_checked(command, timeout=120, output_limit=64 * 1024)
+    if completed.returncode != 0:
+        raise StageContractError("model runtime attestation failed")
+    try:
+        actual = strict_load_json_bytes(completed.stdout)
+    except (UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise StageContractError("model runtime attestation is invalid") from exc
+    if not isinstance(actual, dict) or actual.get("cuda_available") is not True:
+        raise StageContractError("model CUDA runtime is unavailable")
+    for key, value in expected.items():
+        if actual.get(key) != value:
+            raise StageContractError("model runtime version mismatch")
+    timm_direct_url = actual.get("timm_direct_url")
+    if not isinstance(timm_direct_url, dict):
+        raise StageContractError("model timm provenance is missing")
+    vcs = timm_direct_url.get("vcs_info")
+    if (
+        timm_direct_url.get("url") != "https://github.com/huggingface/pytorch-image-models"
+        or not isinstance(vcs, dict)
+        or vcs.get("vcs") != "git"
+        or vcs.get("commit_id") != runtime.get("timm_commit")
+    ):
+        raise StageContractError("model timm provenance mismatch")
+
+
+def _verify_wsl_models(profile: dict[str, object]) -> None:
+    distribution, root, _ = _runtime(profile)
+    models = profile.get("models")
+    if not isinstance(models, list) or len(models) != 3:
+        raise StageContractError("model inventory is invalid")
+    code = profile.get("code")
+    if not isinstance(code, dict) or not isinstance(code.get("commit"), str):
+        raise StageContractError("model code identity is invalid")
+    revision = _run_checked(
+        ["wsl.exe", "-d", distribution, "--cd", f"~/{root}", "--", "git", "rev-parse", "HEAD"],
+        timeout=30,
+    )
+    if revision.returncode != 0 or revision.stdout.decode("ascii", errors="strict").strip() != code["commit"]:
+        raise StageContractError("model code revision mismatch")
+    tracked_status = _run_checked(
+        [
+            "wsl.exe",
+            "-d",
+            distribution,
+            "--cd",
+            f"~/{root}",
+            "--",
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=no",
+        ],
+        timeout=30,
+        output_limit=64 * 1024,
+    )
+    if tracked_status.returncode != 0 or tracked_status.stdout.strip():
+        raise StageContractError("model code checkout has tracked changes")
+
+    entrypoint = profile.get("entrypoint")
+    upstream_script = entrypoint.get("upstream_script") if isinstance(entrypoint, dict) else None
+    if not isinstance(upstream_script, str) or upstream_script != "inference/scripts/inference_psd_quantized.py":
+        raise StageContractError("model upstream entrypoint identity is invalid")
+    committed_entrypoint = _run_checked(
+        [
+            "wsl.exe",
+            "-d",
+            distribution,
+            "--cd",
+            f"~/{root}",
+            "--",
+            "git",
+            "rev-parse",
+            f"{code['commit']}:{upstream_script}",
+        ],
+        timeout=30,
+        output_limit=128,
+    )
+    actual_entrypoint = _run_checked(
+        [
+            "wsl.exe",
+            "-d",
+            distribution,
+            "--cd",
+            f"~/{root}",
+            "--",
+            "git",
+            "hash-object",
+            "--",
+            upstream_script,
+        ],
+        timeout=30,
+        output_limit=128,
+    )
+    try:
+        committed_digest = committed_entrypoint.stdout.decode("ascii", errors="strict").strip()
+        actual_digest = actual_entrypoint.stdout.decode("ascii", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        raise StageContractError("model upstream entrypoint digest is invalid") from exc
+    if (
+        committed_entrypoint.returncode != 0
+        or actual_entrypoint.returncode != 0
+        or len(committed_digest) != 40
+        or any(character not in "0123456789abcdef" for character in committed_digest)
+        or actual_digest != committed_digest
+    ):
+        raise StageContractError("model upstream entrypoint does not match the pinned commit")
+    for model in models:
+        if not isinstance(model, dict) or not isinstance(model.get("local_dir_relative_to_code_root"), str):
+            raise StageContractError("model local inventory is invalid")
+        local_dir = model["local_dir_relative_to_code_root"]
+        configs = model.get("config_files")
+        weights = model.get("weights")
+        if not isinstance(configs, list) or not isinstance(weights, list):
+            raise StageContractError("model file inventory is invalid")
+        for descriptor in (*configs, *weights):
+            if not isinstance(descriptor, dict):
+                raise StageContractError("model file identity is invalid")
+            relative = descriptor.get("path")
+            if not isinstance(relative, str) or ".." in Path(relative).parts:
+                raise StageContractError("model file path is invalid")
+            path = f"{local_dir}/{relative}"
+            if "sha256" in descriptor:
+                digest_command = ["sha256sum", path]
+                expected_digest = descriptor.get("sha256")
+            else:
+                digest_command = ["git", "hash-object", path]
+                expected_digest = descriptor.get("git_blob_sha1")
+            if not isinstance(expected_digest, str):
+                raise StageContractError("model file digest is invalid")
+            completed = _run_checked(
+                ["wsl.exe", "-d", distribution, "--cd", f"~/{root}", "--", *digest_command],
+                timeout=300,
+            )
+            if completed.returncode != 0:
+                raise StageContractError("model file verification failed")
+            digest = completed.stdout.decode("ascii", errors="strict").split(maxsplit=1)[0]
+            if digest != expected_digest:
+                raise StageContractError("model file digest mismatch")
+            if "byte_length" not in descriptor:
+                continue
+            expected_length = descriptor.get("byte_length")
+            if isinstance(expected_length, bool) or not isinstance(expected_length, int):
+                raise StageContractError("model weight size identity is invalid")
+            size = _run_checked(
+                ["wsl.exe", "-d", distribution, "--cd", f"~/{root}", "--", "stat", "-c", "%s", path],
+                timeout=30,
+                output_limit=64,
+            )
+            if size.returncode != 0:
+                raise StageContractError("model weight size verification failed")
+            try:
+                actual_length = int(size.stdout.decode("ascii", errors="strict").strip())
+            except ValueError as exc:
+                raise StageContractError("model weight size is invalid") from exc
+            if actual_length != expected_length:
+                raise StageContractError("model weight size mismatch")
+
+
+def _invoke_wsl(source: Path, output: Path, profile: dict[str, object], timeout_seconds: int) -> subprocess.CompletedProcess[bytes]:
+    distribution, root, python = _runtime(profile)
+    _verify_wsl_models(profile)
+    inference = _validated_inference(profile)
+    _validated_postprocess(profile)
+    entrypoint = _validated_entrypoint(profile)
+    models = profile.get("models")
+    if not isinstance(models, list) or len(models) != 3:
+        raise StageContractError("model inference profile is invalid")
+    local_models: dict[str, str] = {}
+    for model in models:
+        if not isinstance(model, dict):
+            raise StageContractError("model identity is invalid")
+        role = model.get("role")
+        local_dir = model.get("local_dir_relative_to_code_root")
+        if not isinstance(role, str) or not isinstance(local_dir, str) or ".." in Path(local_dir).parts:
+            raise StageContractError("model local directory is invalid")
+        if role in local_models:
+            raise StageContractError("model role is duplicated")
+        local_models[role] = local_dir
+    if set(local_models) != {
+        "scheduler_configuration",
+        "semantic_layer_generation",
+        "semantic_layer_depth",
+    }:
+        raise StageContractError("model role inventory is invalid")
+    source_wsl = _wsl_path(source, distribution)
+    entrypoint_wsl = _wsl_path(entrypoint, distribution)
+    inference_output = output / "input"
+    inference_output.mkdir()
+    output_wsl = _wsl_path(inference_output, distribution)
+    command = [
+        "wsl.exe", "-d", distribution, "--cd", f"~/{root}", "--",
+        f"./{python}", entrypoint_wsl,
+        "--srcp", source_wsl,
+        "--save_dir", output_wsl,
+        "--save_to_psd",
+        "--tblr_split",
+        "--quant_mode", str(inference.get("quantization")),
+        "--repo_id_layerdiff", local_models["semantic_layer_generation"],
+        "--repo_id_depth", local_models["semantic_layer_depth"],
+        "--seed", str(inference.get("seed")),
+        "--resolution", str(inference.get("resolution")),
+        "--resolution_depth", str(inference.get("depth_resolution")),
+        "--num_inference_steps", str(inference.get("inference_steps")),
+    ]
+    if inference.get("cpu_offload") is True:
+        command.append("--cpu_offload")
+    if inference.get("group_offload") is True:
+        command.append("--group_offload")
+    else:
+        command.append("--no_group_offload")
+    command[command.index("--") + 1 : command.index("--") + 1] = [
+        "env",
+        "HF_HUB_DISABLE_TELEMETRY=1",
+        "HF_HUB_DISABLE_PROGRESS_BARS=1",
+        f"HF_HOME=~/{root}/models/hf-cache",
+        "HF_HUB_OFFLINE=1",
+        "TRANSFORMERS_OFFLINE=1",
+        "TRANSFORMERS_NO_ADVISORY_WARNINGS=1",
+        "DO_NOT_TRACK=1",
+        f"PYTORCH_CUDA_ALLOC_CONF={inference.get('cuda_allocator')}",
+    ]
+    return _run_checked(
+        command,
+        timeout=timeout_seconds,
+        output_limit=MAX_MODEL_STDIO_BYTES,
+        env=os.environ.copy(),
+    )
+
+
+def _validated_inference(profile: dict[str, object]) -> dict[str, object]:
+    inference = profile.get("inference")
+    keys = {
+        "quantization",
+        "seed",
+        "resolution",
+        "depth_resolution",
+        "inference_steps",
+        "cpu_offload",
+        "group_offload",
+        "cuda_allocator",
+        "left_right_split",
+    }
+    if not isinstance(inference, dict) or set(inference) != keys:
+        raise StageContractError("model inference profile is invalid")
+    if (
+        inference["quantization"] != "nf4"
+        or isinstance(inference["seed"], bool)
+        or not isinstance(inference["seed"], int)
+        or not 0 <= inference["seed"] <= 2**63 - 1
+        or inference["resolution"] != 1280
+        or inference["depth_resolution"] != 768
+        or inference["inference_steps"] != 30
+        or inference["cpu_offload"] is not True
+        or inference["group_offload"] is not False
+        or inference["cuda_allocator"] != "expandable_segments:True"
+        or inference["left_right_split"] is not True
+    ):
+        raise StageContractError("model inference settings are invalid")
+    return inference
+
+
+def _validated_postprocess(profile: dict[str, object]) -> dict[str, object]:
+    postprocess = profile.get("postprocess")
+    if (
+        not isinstance(postprocess, dict)
+        or set(postprocess) != {"algorithm_id", "visible_alpha_threshold", "neutral_reconstruction"}
+        or postprocess.get("algorithm_id") != SOURCE_PRESERVE_ALGORITHM_ID
+        or postprocess.get("visible_alpha_threshold") != 31
+        or postprocess.get("neutral_reconstruction") != "source-rgb-with-max-cleaned-semantic-alpha"
+    ):
+        raise StageContractError("model postprocess profile is invalid")
+    return postprocess
+
+
+def _strict_model_json(path: Path, label: str) -> dict[str, object]:
+    try:
+        value = strict_load_json_bytes(read_bounded_file(path))
+    except (OSError, ValueError, TypeError) as exc:
+        raise StageContractError(f"model worker {label} is invalid") from exc
+    if not isinstance(value, dict):
+        raise StageContractError(f"model worker {label} is invalid")
+    return value
+
+
+def _validated_png(
+    path: Path,
+    *,
+    expected_mode: str,
+    expected_size: tuple[int, int],
+    require_alpha: bool = False,
+) -> None:
+    from PIL import Image
+
+    try:
+        exact = read_bounded_file(path, MAX_MODEL_PNG_BYTES)
+        with Image.open(io.BytesIO(exact), formats=("PNG",)) as image:
+            if (
+                image.format != "PNG"
+                or image.mode != expected_mode
+                or image.size != expected_size
+                or getattr(image, "n_frames", 1) != 1
+            ):
+                raise StageContractError("model worker PNG is outside the fixed output profile")
+            image.load()
+            if require_alpha:
+                extrema = image.getextrema()
+                if not isinstance(extrema, tuple) or len(extrema) != 4 or extrema[3][1] == 0:
+                    raise StageContractError("model worker required semantic layer is empty")
+    except StageContractError:
+        raise
+    except Exception as exc:
+        raise StageContractError("model worker PNG is invalid") from exc
+
+
+def _expected_output_uris() -> set[str]:
+    semantic_root = "input/input"
+    return {
+        *(f"{semantic_root}/{name}.png" for name in MODEL_SEMANTIC_NAMES),
+        *(f"{semantic_root}/{name}_depth.png" for name in MODEL_PART_NAMES),
+        f"{semantic_root}/reconstruction.png",
+        f"{semantic_root}/src_head.png",
+        f"{semantic_root}/src_img.png",
+        f"{semantic_root}/info.json",
+        f"{semantic_root}/stats.json",
+        "input/input.psd",
+        "input/input.psd.json",
+        "input/input_depth.psd",
+    }
+
+
+def _validate_model_output(directory: Path, profile: dict[str, object]) -> tuple[ModelPsdStructure, ModelPsdStructure]:
+    inference = _validated_inference(profile)
+    resolution = inference["resolution"]
+    if isinstance(resolution, bool) or not isinstance(resolution, int):
+        raise StageContractError("model worker output resolution is invalid")
+    expected_size = (resolution, resolution)
+    result_root = directory / "input"
+    semantic_root = result_root / "input"
+    if (
+        result_root.is_symlink()
+        or semantic_root.is_symlink()
+        or not result_root.is_dir()
+        or not semantic_root.is_dir()
+    ):
+        raise StageContractError("model worker output layout is invalid")
+
+    info = _strict_model_json(semantic_root / "info.json", "semantic metadata")
+    parts = info.get("parts")
+    if (
+        set(info) != {"parts"}
+        or not isinstance(parts, dict)
+        or tuple(parts) != MODEL_PART_NAMES
+        or any(value != {} for value in parts.values())
+    ):
+        raise StageContractError("model worker semantic ontology is invalid")
+
+    _validated_png(
+        semantic_root / "reconstruction.png",
+        expected_mode="RGBA",
+        expected_size=expected_size,
+        require_alpha=True,
+    )
+    _validated_png(
+        semantic_root / "src_img.png",
+        expected_mode="RGBA",
+        expected_size=expected_size,
+        require_alpha=True,
+    )
+    _validated_png(
+        semantic_root / "src_head.png",
+        expected_mode="RGBA",
+        expected_size=expected_size,
+        require_alpha=True,
+    )
+    for name in MODEL_SEMANTIC_NAMES:
+        _validated_png(
+            semantic_root / f"{name}.png",
+            expected_mode="RGBA",
+            expected_size=expected_size,
+            require_alpha=name in {"face", "head", "mouth"},
+        )
+    for name in MODEL_PART_NAMES:
+        _validated_png(
+            semantic_root / f"{name}_depth.png",
+            expected_mode="L",
+            expected_size=expected_size,
+        )
+
+    stats = _strict_model_json(semantic_root / "stats.json", "statistics")
+    if set(stats) != {"quant_mode", *MODEL_STATS_KEYS} or stats.get("quant_mode") != inference["quantization"]:
+        raise StageContractError("model worker statistics are invalid")
+    for key in MODEL_STATS_KEYS:
+        value = stats.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value < 0:
+            raise StageContractError("model worker statistics are invalid")
+    if float(stats["total_time_s"]) < sum(
+        float(stats[key]) for key in ("layerdiff_time_s", "marigold_time_s", "psd_time_s")
+    ):
+        raise StageContractError("model worker statistics are invalid")
+
+    try:
+        main_psd = validate_model_psd(result_root / "input.psd")
+    except (OSError, ValueError, TypeError, StageContractError) as exc:
+        raise StageContractError("model worker PSD is invalid") from exc
+    try:
+        depth_psd = validate_model_psd(result_root / "input_depth.psd", profile="grayscale")
+    except (OSError, ValueError, TypeError, StageContractError) as exc:
+        raise StageContractError("model worker depth PSD is invalid") from exc
+    if (main_psd.width, main_psd.height) != expected_size or (depth_psd.width, depth_psd.height) != expected_size:
+        raise StageContractError("model worker PSD canvas does not match the fixed output profile")
+    main_layers = tuple((layer.name, layer.top, layer.left, layer.bottom, layer.right) for layer in main_psd.layers)
+    depth_layers = tuple((layer.name, layer.top, layer.left, layer.bottom, layer.right) for layer in depth_psd.layers)
+    if main_layers != depth_layers:
+        raise StageContractError("model worker PSD semantic structures do not match")
+    allowed_psd_names = set(MODEL_SEMANTIC_NAMES)
+    allowed_psd_names.update(f"{name}-{side}" for name in MODEL_PART_NAMES for side in ("l", "r"))
+    if any(layer.name not in allowed_psd_names for layer in main_psd.layers):
+        raise StageContractError("model worker PSD semantic name is outside the fixed ontology")
+
+    psd_metadata = _strict_model_json(result_root / "input.psd.json", "PSD metadata")
+    psd_parts = psd_metadata.get("parts")
+    if (
+        set(psd_metadata) != {"parts", "frame_size"}
+        or psd_metadata.get("frame_size") != [resolution, resolution]
+        or not isinstance(psd_parts, dict)
+        or set(psd_parts) != {layer.name for layer in main_psd.layers}
+        or any(not isinstance(value, dict) for value in psd_parts.values())
+    ):
+        raise StageContractError("model worker PSD metadata is invalid")
+    for layer in main_psd.layers:
+        value = psd_parts[layer.name]
+        base_name = layer.name[:-2] if layer.name.endswith(("-l", "-r")) else layer.name
+        median = value.get("depth_median")
+        part_id = value.get("part_id")
+        if (
+            not {"xyxy", "tag", "depth_median"}.issubset(value)
+            or not set(value).issubset({"xyxy", "tag", "depth_median", "part_id"})
+            or value.get("tag") != layer.name
+            or base_name not in MODEL_PART_NAMES
+            or value.get("xyxy") != [layer.left, layer.top, layer.right, layer.bottom]
+            or isinstance(median, bool)
+            or not isinstance(median, (int, float))
+            or not math.isfinite(float(median))
+            or not 0 <= float(median) <= 1
+            or (part_id is not None and (isinstance(part_id, bool) or not isinstance(part_id, int) or part_id < 0))
+        ):
+            raise StageContractError("model worker PSD metadata is invalid")
+    return main_psd, depth_psd
+
+
+def _inventory(directory: Path) -> list[dict[str, object]]:
+    if directory.is_symlink() or not directory.is_dir():
+        raise StageContractError("model worker did not publish an output directory")
+    files: list[dict[str, object]] = []
+    total = 0
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise StageContractError("model worker output contains a symlink")
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if directory.resolve() not in resolved.parents:
+            raise StageContractError("model worker output escaped its directory")
+        size = path.stat().st_size
+        total += size
+        if total > MAX_MODEL_RESULT_BYTES:
+            raise StageContractError("model worker result exceeded its bound")
+        files.append({
+            "uri": path.relative_to(directory).as_posix(),
+            "byte_length": size,
+            "sha256": sha256_bytes(read_bounded_file(path, MAX_MODEL_RESULT_BYTES)),
+        })
+    if not files:
+        raise StageContractError("model worker produced no files")
+    return files
+
+
+def run_model_worker(source: Path, output_root: Path, *, timeout_seconds: int = 1800) -> dict[str, object]:
+    if source.is_symlink() or not source.is_file():
+        raise StageContractError("model worker source is invalid")
+    source_bytes = read_bounded_file(source, 25 * 1024 * 1024)
+    profile, profile_bytes = _load_profile()
+    runtime = profile.get("runtime")
+    if not isinstance(runtime, dict):
+        raise StageContractError("model worker runtime profile is invalid")
+    dependencies_profile = runtime.get("dependencies_profile")
+    if (
+        not isinstance(dependencies_profile, str)
+        or Path(dependencies_profile).name != dependencies_profile
+        or not dependencies_profile
+    ):
+        raise StageContractError("model dependency profile path is invalid")
+    dependencies_bytes = read_bounded_file(PROFILE_ROOT / dependencies_profile, 256 * 1024)
+    dependencies_sha256 = sha256_bytes(dependencies_bytes)
+    _verify_runtime(profile, dependencies_sha256)
+    output_root.mkdir(parents=True, exist_ok=False)
+    local_source = Path(tempfile.mkdtemp(prefix="source-", dir=output_root.parent)) / "input.png"
+    local_source.write_bytes(source_bytes)
+    try:
+        completed = _invoke_wsl(local_source, output_root, profile, timeout_seconds)
+    finally:
+        shutil.rmtree(local_source.parent, ignore_errors=True)
+    if completed.returncode != 0:
+        raise StageContractError("model worker process failed")
+    candidates = [item for item in output_root.iterdir() if item.is_dir() and not item.is_symlink()]
+    if len(candidates) != 1 or candidates[0].name != "input":
+        raise StageContractError("model worker output identity is ambiguous")
+    validated_psd, validated_depth_psd = _validate_model_output(output_root, profile)
+    files = _inventory(output_root)
+    indexed = {str(item["uri"]): item for item in files}
+    if set(indexed) != _expected_output_uris():
+        raise StageContractError("model worker output inventory does not match the fixed profile")
+    for uri, structure in (
+        ("input/input.psd", validated_psd),
+        ("input/input_depth.psd", validated_depth_psd),
+    ):
+        descriptor = indexed[uri]
+        if descriptor["byte_length"] != structure.byte_length or descriptor["sha256"] != structure.sha256:
+            raise StageContractError("model worker PSD changed during publication")
+    return {
+        "format": "oneclick2d.model-worker-result",
+        "format_version": "0.1.0",
+        "scope": "disposable-local-model-spike",
+        "state": "completed",
+        "profile_id": PROFILE_ID,
+        "profile_sha256": sha256_bytes(profile_bytes),
+        "dependencies_sha256": dependencies_sha256,
+        "source_sha256": sha256_bytes(source_bytes),
+        "model_used": True,
+        "oc2d_produced": False,
+        "gate_f_status": "GATE_F_NOT_EVALUATED",
+        "files": files,
+        "psd": indexed["input/input.psd"],
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--timeout-seconds", type=int, default=1800)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if not 1 <= args.timeout_seconds <= 3600 or args.result.exists():
+        return 2
+    try:
+        result = run_model_worker(args.source, args.output, timeout_seconds=args.timeout_seconds)
+        args.result.write_bytes(canonical_json_bytes(result))
+    except (OSError, ValueError, TypeError, StageContractError):
+        if args.output.exists():
+            shutil.rmtree(args.output, ignore_errors=True)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

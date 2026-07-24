@@ -281,6 +281,17 @@ operational_causes:
     telemetry_category: PACKAGE
     severity: blocking
     owner: spike-runner
+  - id: CANDIDATE_SUITABILITY_UNSUPPORTED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: candidate_suitability_unsupported
+    message_key: cause.candidate.suitability_unsupported
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
 quality_findings:
   - id: RASTER_UNTAGGED_ASSUMED_SRGB
     category: INPUT

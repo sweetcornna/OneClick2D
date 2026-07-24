@@ -20,6 +20,58 @@ SOURCE = FIXTURE / "source.synthetic.json"
 
 
 class GateFRunnerTests(unittest.TestCase):
+    def test_stage_observer_is_ordered_and_non_evidentiary(self) -> None:
+        events: list[tuple[str, str, StageStatus | None]] = []
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            first_status, first_manifest_path = PipelineRunner(build_synthetic_registry(), Path(first)).run(
+                spec_path=SPEC,
+                source_path=SOURCE,
+                run_id="run.observed",
+                source_revision="source.test",
+                build_id="build.test",
+                stage_observer=lambda stage, event, status: events.append((stage, event, status)),
+            )
+            second_status, second_manifest_path = PipelineRunner(build_synthetic_registry(), Path(second)).run(
+                spec_path=SPEC,
+                source_path=SOURCE,
+                run_id="run.unobserved",
+                source_revision="source.test",
+                build_id="build.test",
+            )
+            self.assertEqual(StageStatus.SUCCEEDED, first_status)
+            self.assertEqual(StageStatus.SUCCEEDED, second_status)
+            self.assertEqual(
+                [
+                    ("stage.synthetic-normalize", "started", None),
+                    ("stage.synthetic-normalize", "completed", StageStatus.SUCCEEDED),
+                    ("stage.synthetic-proposal", "started", None),
+                    ("stage.synthetic-proposal", "completed", StageStatus.SUCCEEDED),
+                    ("stage.synthetic-verify", "started", None),
+                    ("stage.synthetic-verify", "completed", StageStatus.SUCCEEDED),
+                ],
+                events,
+            )
+            first_manifest = json.loads(first_manifest_path.read_text(encoding="utf-8"))
+            second_manifest = json.loads(second_manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(first_manifest["result"]["sha256"], second_manifest["result"]["sha256"])
+            self.assertNotIn("observer", first_manifest)
+
+    def test_stage_observer_failure_does_not_fail_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def fail_observer(stage: str, event: str, status: StageStatus | None) -> None:
+                raise RuntimeError("observer failure")
+
+            status, manifest_path = PipelineRunner(build_synthetic_registry(), Path(directory)).run(
+                spec_path=SPEC,
+                source_path=SOURCE,
+                run_id="run.observer-failure",
+                source_revision="source.test",
+                build_id="build.test",
+                stage_observer=fail_observer,
+            )
+            self.assertEqual(StageStatus.SUCCEEDED, status)
+            self.assertEqual("succeeded", json.loads(manifest_path.read_text(encoding="utf-8"))["terminal_status"])
+
     def test_smoke_run_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             first_status, first_manifest_path = PipelineRunner(

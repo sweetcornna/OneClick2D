@@ -10,9 +10,15 @@ OneClick2D 处于文档优先的立项/可行性阶段。Gate F 尚未证明核�
 python scripts/validate_docs.py
 python -m unittest discover -s tests -p "test_*.py"
 python -m spikes.gate_f_runner smoke --run-id run.local-smoke
+python -m spikes.gate_f_runner preflight --run-id run.local-technical
+python -m spikes.gate_f_runner gui
+python -m spikes.gate_f_runner model --source "C:/path/to/right-cleared.png" --run-id run.local-model
+python -m spikes.gate_f_runner motion --run-id run.local-model
 ```
 
-文档检查只能称“立项文档 lint”；固定 smoke 只能称“标准库合成编排 smoke”；真实 raster Adapter 只能证明其锁定 profile 下的非计分 ingest/normalization 边界；固定 simple-cutout comparator 只证明其 12 帧 neutral/endpoint/combination 实现预检。它们都不是 schema/package conformance、安全隔离、模型/PSD 或 Gate F 可行性证明。Gate F 前可执行预研放在 `spikes/`，任何生产包不得导入它。技术栈选定后，同一变更更新 README、CONTRIBUTING 和本文件的固定命令。
+文档检查只能称“立项文档 lint”；固定 smoke 只能称“标准库合成编排 smoke”；真实 raster Adapter 只能证明其锁定 profile 下的非计分 ingest/normalization 边界；`preflight` 只证明 purpose-created candidate/comparator、共享序列/renderer、paired evaluator 和 PSD structural readback 的本地技术预检，成功状态必须写 `LOCAL_TECHNICAL_PREFLIGHT_PASS` 且 `GATE_F_NOT_EVALUATED`；`gui` 只能是 loopback-only 本地图片工作台，可接收权利明确的本地 PNG/JPEG，并显式选择固定区域 deterministic baseline，或在同一规范化边界后调用隔离 WSL2 worker 的 hash-pinned See-through V3 NF4 模型路径，不得扩成外网或生产服务。模型执行及全部产物校验成功前必须保持 `model_used: false`。GUI 不生成 `.oc2d`、不自动删除工作区，成功只能写 `LOCAL_WORKBENCH_COMPLETED` 且 `GATE_F_NOT_EVALUATED`。显式 `model` 命令使用同一固定 profile，成功只能写 `LOCAL_MODEL_SPIKE_COMPLETED` 且 `GATE_F_NOT_EVALUATED`。`motion` 只接受通过中性保真校验的 active v4 运行，成功只能写 `LOCAL_MODEL_MOTION_DRAFT_COMPLETED` 且 `GATE_F_NOT_EVALUATED`；其 37 帧 bbox quad/affine 结果只能标 `research_draft`，不得描述为专业绑定、Live2D 成品、mesh-delta、`.oc2d` 或 `.moc3`。supporting weight 许可元数据仍不完整，禁止权重再分发和产品使用。它们都不是 schema/package conformance、安全隔离、模型质量、PSD 互操作或 Gate F 可行性证明。Gate F 前可执行预研放在 `spikes/`，任何生产包不得导入它。技术栈选定后，同一变更更新 README、CONTRIBUTING 和本文件的固定命令。
+
+默认模型 profile 为 `see-through.v3.nf4.1280.wsl2.source-preserve.v4`。它只在 PSD 组装前以固定噪声底清理语义 alpha、按逐层深度把原图 RGB 回填到最前可见语义层，并以清理后各层最大 alpha 重建中性图；报告必须记录输入证据、可见像素保真和 `review_required`。不得把该处理描述为蒙版语义正确、隐藏区域真实或商用级。未附加 motion 时网格/绑定/动态必须是 `not_generated`；附加后也只能把 bbox quad、五参数 affine binding 与动态预览标记为 `research_draft`。历史 `see-through.v3.nf4.1280.wsl2.v2` 与 `see-through.v3.nf4.1280.wsl2.source-preserve.v3` 结果继续按各自原 profile/入口摘要验证，且不得追溯声称应用 v4 蒙版净化。
 
 ## 产品硬边界
 

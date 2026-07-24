@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-candidate-baseline/v0.1/report.schema.json",
+  "title": "OneClick2D Gate F Deterministic Candidate Baseline Report v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "scope", "adapter_id", "adapter_version", "contract_id", "input", "suitability", "ontology", "layers", "geometry", "parameters", "sequence", "rendering", "frames", "validation", "claims"],
+  "properties": {
+    "format": {"const": "oneclick2d.candidate-baseline-report"},
+    "format_version": {"const": "0.1.0"},
+    "scope": {"const": "disposable-gate-f-spike"},
+    "adapter_id": {"const": "candidate.baseline.pillow.v1"},
+    "adapter_version": {"const": "0.1.0"},
+    "contract_id": {"const": "oc2d.spike.candidate-baseline.v1"},
+    "input": {"type": "object"},
+    "suitability": {"type": "object"},
+    "ontology": {"type": "array", "minItems": 6, "maxItems": 6},
+    "layers": {"type": "array", "minItems": 5, "maxItems": 5},
+    "geometry": {"type": "array", "minItems": 4, "maxItems": 4},
+    "parameters": {"type": "array", "minItems": 5, "maxItems": 5},
+    "sequence": {"type": "object"},
+    "rendering": {"type": "object"},
+    "frames": {"type": "array", "minItems": 37, "maxItems": 37},
+    "validation": {"type": "object"},
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_used", "semantic_correctness_on_real_art_proven", "psd_produced", "gate_f_feasibility_proven"],
+      "properties": {
+        "model_used": {"const": false},
+        "semantic_correctness_on_real_art_proven": {"const": false},
+        "psd_produced": {"const": false},
+        "gate_f_feasibility_proven": {"const": false}
+      }
+    }
+  }
+}

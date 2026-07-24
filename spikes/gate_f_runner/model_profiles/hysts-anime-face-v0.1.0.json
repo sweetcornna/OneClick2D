@@ -1,0 +1,50 @@
+{
+  "format": "oneclick2d.model-spike-profile",
+  "format_version": "0.1.0",
+  "profile_id": "hysts.anime-face-detector.yolov3-hrnetv2.v0.1.0",
+  "code": {
+    "repository": "https://github.com/hysts/anime-face-detector.git",
+    "commit": "7db835de7a3a052eb4d68d241ae9f2cf28a0b509",
+    "package": "anime-face-detector==0.1.0",
+    "package_wheel_sha256": "9a6a8c1384b7a57fab8ce9988f814271ff88bac52a9dd871490a28b61dff7692",
+    "license": "MIT",
+    "vendored_code_license": "Apache-2.0"
+  },
+  "runtime": {
+    "python": ">=3.12",
+    "torch": ">=2.2.0",
+    "input_color": "bgr",
+    "default_device": "cuda:0"
+  },
+  "models": [
+    {
+      "role": "anime_face_detection",
+      "repository": "hysts/anime-face-detector-yolov3",
+      "revision": "afdd4226a79ae8bb81f334dbcffd34f8cc000c38",
+      "path": "model.safetensors",
+      "byte_length": 246354512,
+      "sha256": "23bbc708146bcbc1c910f00fe152adbc70d7658d875a0121eaf4ee61d978b2c4",
+      "license": "MIT"
+    },
+    {
+      "role": "anime_face_landmarks_28",
+      "repository": "hysts/anime-face-detector-hrnetv2",
+      "revision": "9b3435248b26aeb82e2a8578fe9d86d5d57158af",
+      "path": "model.safetensors",
+      "byte_length": 38917560,
+      "sha256": "e71271376406a743c01528a0460637fcc06e72aeeea583f85007cc72dc8b7a4a",
+      "license": "MIT"
+    }
+  ],
+  "outputs": {
+    "bbox": "source-pixel float [x0,y0,x1,y1,score]",
+    "keypoints": "source-pixel float [28,3] where score is an uncalibrated heatmap peak",
+    "left_right_semantics": "unverified-must-map-deterministically"
+  },
+  "claims": {
+    "scope": "disposable-local-model-spike",
+    "gate_f_status": "GATE_F_NOT_EVALUATED",
+    "head_pose_degrees_produced": false,
+    "semantic_layers_produced": false
+  }
+}
