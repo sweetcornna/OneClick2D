@@ -8,7 +8,7 @@
 | D-001 | 五类责任人和容量计划 | Program / G0 | 具名 owner/reviewer、person-weeks、外部 lead time | 只做本地 spike | Open |
 | D-002 | 仓库/产品/贡献及代码/模型/数据/字体/素材许可 | Product/Legal / G0 | 业务分发、义务、专利、notices | 私有、不可分发 | Open |
 | D-003 | Gate F 数据/模型预算及采购路径 | Product/ML/Legal / G0 | 数量、合同、权利、吞吐、候选模型 | 仅目的创建 feasibility | Open |
-| D-004 | Gate F 假设、切片、对照、kill criteria、强制参数 | ML/Graphics/Product / G0 | 预注册协议 | 无发布参数承诺 | Open |
+| D-004 | Gate F 假设、切片、对照、kill criteria、强制参数 | ML/Graphics/Product / G0 | [技术预注册决策](gate-records/GATE_F_TECHNICAL_PREREGISTRATION.md)；Gate 0 激活时绑定 immutable tree | 无发布参数承诺；D-003/D-009 仍阻止计分运行 | Closed (technical decision; not activated) |
 | D-005 | 前后端语言/框架/包工具/renderer/schema toolchain | Technical / G1 | Gate F 后 spike、维护/安全 | framework-light disposable | Open |
 | D-006 | 最简架构：DB claim runner vs managed queue/object | Technical / G1 | failure semantics、成本、运营触发 | in-process fake transport | Open |
 | D-007 | 云/地区/OIDC/store/processor/no-backup/上传下载授权 | Tech/Privacy/Legal / G1 | provider proof、删除、replay/revoke | 无真实用户云；proxy download | Open |

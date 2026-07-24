@@ -32,6 +32,7 @@
 - [数据采购与权利](DATA_ACQUISITION_AND_RIGHTS_PLAN.md)：Gate 数据、预算和资产台账。
 - [容量与成本](CAPACITY_COST_CONTROL.md)：接受前预留、预算和成本分母。
 - [Gate 0 记录](gate-records/GATE_0.md)：不可变证据、具名批准和决定。
+- [Gate F 技术预注册](gate-records/GATE_F_TECHNICAL_PREREGISTRATION.md)：冻结 D-004 技术协议；D-003/D-009 关闭并由 Gate 0 绑定前不激活。
 
 ## 架构与格式
 
@@ -39,6 +40,7 @@
 - [CIR / `.oc2d` 逻辑规范](CIR_SPEC.md)
 - [`.oc2d` 包一致性规范](PACKAGE_CONFORMANCE.md)
 - [PSD 导出配置](PSD_EXPORT_PROFILE.md)
+- [模型动态研究初稿](MODEL_MOTION_DRAFT.md)
 
 ## 质量、工程与治理
 

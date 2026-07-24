@@ -1,0 +1,13 @@
+{
+  "format": "oneclick2d.model-motion-draft-config",
+  "format_version": "0.1.0",
+  "profile_id": "oc2d.spike.model-motion-draft.affine-semantic.v13",
+  "required_model_profile_id": "see-through.v3.nf4.1280.wsl2.source-preserve.v4",
+  "required_pillow_version": "12.1.0",
+  "frame_sequence": {
+    "format": "oneclick2d.gate-f-frame-sequence-config",
+    "format_version": "0.1.0",
+    "profile_id": "oc2d.spike.gate-f-frame-sequence.v1",
+    "seed_u64": "00000000000000000042"
+  }
+}

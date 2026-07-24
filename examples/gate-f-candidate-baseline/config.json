@@ -1,0 +1,12 @@
+{
+  "format": "oneclick2d.candidate-baseline-config",
+  "format_version": "0.1.0",
+  "profile_id": "oc2d.spike.candidate-baseline.fixed-regions.v1",
+  "required_pillow_version": "12.1.0",
+  "frame_sequence": {
+    "format": "oneclick2d.gate-f-frame-sequence-config",
+    "format_version": "0.1.0",
+    "profile_id": "oc2d.spike.gate-f-frame-sequence.v1",
+    "seed_u64": "00000000000000000042"
+  }
+}

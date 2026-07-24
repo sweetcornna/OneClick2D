@@ -1,0 +1,68 @@
+{
+  "$schema": "../../schemas/gate-f-run-spec/v0.1/run-spec.schema.json",
+  "format": "oneclick2d.gate-f-run-spec",
+  "format_version": "0.1.0",
+  "scope": "disposable-gate-f-spike",
+  "execution_profile": "python-stdlib-in-process-v1",
+  "root_seed_u64": "00000000000000000042",
+  "source": {
+    "role": "synthetic_source",
+    "sha256": "744ddd21e71e156588045c3b9a3682b2978b73fcb91a51785906b5f75f15e944",
+    "media_type": "application/vnd.oneclick2d.synthetic-grid+json",
+    "max_bytes": 4096
+  },
+  "expected_result_role": "spike_result",
+  "stages": [
+    {
+      "id": "stage.synthetic-normalize",
+      "stage_type": "oc2d.spike.synthetic-normalize",
+      "adapter_id": "synthetic.normalize.v1",
+      "config_uri": "configs/normalize.json",
+      "config_sha256": "9fa6b9061b40b870b0076d90dfa4761b43307df58ea2a1fed0623fccb13ede9f",
+      "limits": {
+        "max_wall_time_ms": 5000,
+        "max_cpu_time_ms": 5000,
+        "max_peak_ram_bytes": 536870912,
+        "max_scratch_bytes": 1048576,
+        "max_output_bytes": 1048576,
+        "max_output_files": 4,
+        "max_peak_vram_bytes": 0,
+        "gpu_allowed": false
+      }
+    },
+    {
+      "id": "stage.synthetic-proposal",
+      "stage_type": "oc2d.spike.synthetic-proposal",
+      "adapter_id": "synthetic.proposal.v1",
+      "config_uri": "configs/proposal.json",
+      "config_sha256": "46bf647c68a354d9435a290840491a51387f6b249b75d2d5f1b4582ea3fd57d7",
+      "limits": {
+        "max_wall_time_ms": 5000,
+        "max_cpu_time_ms": 5000,
+        "max_peak_ram_bytes": 536870912,
+        "max_scratch_bytes": 1048576,
+        "max_output_bytes": 1048576,
+        "max_output_files": 4,
+        "max_peak_vram_bytes": 0,
+        "gpu_allowed": false
+      }
+    },
+    {
+      "id": "stage.synthetic-verify",
+      "stage_type": "oc2d.spike.synthetic-verify",
+      "adapter_id": "synthetic.verify.v1",
+      "config_uri": "configs/verify.json",
+      "config_sha256": "25468559b6990a70c59535d1b62498ce9a21eac3fc09c62c1d581e06f032ca1d",
+      "limits": {
+        "max_wall_time_ms": 5000,
+        "max_cpu_time_ms": 5000,
+        "max_peak_ram_bytes": 536870912,
+        "max_scratch_bytes": 1048576,
+        "max_output_bytes": 1048576,
+        "max_output_files": 4,
+        "max_peak_vram_bytes": 0,
+        "gpu_allowed": false
+      }
+    }
+  ]
+}

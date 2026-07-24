@@ -70,7 +70,235 @@ operational_causes:
     telemetry_category: EXPORT
     severity: blocking
     owner: format-export
+  - id: STAGE_RESOURCE_LIMIT_EXCEEDED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: FAILED
+    retryable: false
+    user_action: inspect_spike_configuration
+    http_problem_code: stage_resource_limit_exceeded
+    message_key: cause.stage_resource_limit_exceeded
+    telemetry_category: RESOURCE
+    severity: blocking
+    owner: spike-runner
+  - id: STAGE_CONTRACT_VIOLATION
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: FAILED
+    retryable: false
+    user_action: inspect_spike_contract
+    http_problem_code: stage_contract_violation
+    message_key: cause.stage_contract_violation
+    telemetry_category: PACKAGE
+    severity: blocking
+    owner: spike-runner
+  - id: STAGE_INTERNAL_ERROR
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: FAILED
+    retryable: false
+    user_action: inspect_local_test_failure
+    http_problem_code: stage_internal_error
+    message_key: cause.stage_internal_error
+    telemetry_category: RESOURCE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_DEPENDENCY_UNAVAILABLE
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: install_locked_spike_dependency
+    http_problem_code: raster_dependency_unavailable
+    message_key: cause.raster.dependency_unavailable
+    telemetry_category: LICENSE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_RUNTIME_UNSUPPORTED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: use_locked_spike_runtime
+    http_problem_code: raster_runtime_unsupported
+    message_key: cause.raster.runtime_unsupported
+    telemetry_category: RESOURCE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_INPUT_BLOCKED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input_or_inspect_reason
+    http_problem_code: raster_input_blocked
+    message_key: cause.raster.input_blocked
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
+  # Raster adapter subcodes are local spike diagnostics grouped under RASTER_INPUT_BLOCKED;
+  # manifests never include paths, metadata, free text, or raw exception details.
+  - id: RASTER_MEDIA_TYPE_MISMATCH
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_media_type_mismatch
+    message_key: cause.raster.media_type_mismatch
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_FORMAT_UNSUPPORTED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_format_unsupported
+    message_key: cause.raster.format_unsupported
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_CONTAINER_INVALID
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_container_invalid
+    message_key: cause.raster.container_invalid
+    telemetry_category: PARSE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_MULTIFRAME_UNSUPPORTED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_multiframe_unsupported
+    message_key: cause.raster.multiframe_unsupported
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_DECOMPRESSION_LIMIT_EXCEEDED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_decompression_limit_exceeded
+    message_key: cause.raster.decompression_limit_exceeded
+    telemetry_category: RESOURCE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_DIMENSIONS_UNSUPPORTED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_dimensions_unsupported
+    message_key: cause.raster.dimensions_unsupported
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_MODE_OR_BIT_DEPTH_UNSUPPORTED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_mode_or_bit_depth_unsupported
+    message_key: cause.raster.mode_or_bit_depth_unsupported
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_METADATA_LIMIT_EXCEEDED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_metadata_limit_exceeded
+    message_key: cause.raster.metadata_limit_exceeded
+    telemetry_category: RESOURCE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_EXIF_INVALID
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_exif_invalid
+    message_key: cause.raster.exif_invalid
+    telemetry_category: PARSE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_ICC_PROFILE_INVALID
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_icc_profile_invalid
+    message_key: cause.raster.icc_profile_invalid
+    telemetry_category: PARSE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_ICC_PROFILE_REQUIRED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: raster_icc_profile_required
+    message_key: cause.raster.icc_profile_required
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_COLOR_MANAGEMENT_UNAVAILABLE
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: use_locked_spike_runtime
+    http_problem_code: raster_color_management_unavailable
+    message_key: cause.raster.color_management_unavailable
+    telemetry_category: RESOURCE
+    severity: blocking
+    owner: spike-runner
+  - id: RASTER_CONFIG_INVALID
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: inspect_spike_configuration
+    http_problem_code: raster_config_invalid
+    message_key: cause.raster.config_invalid
+    telemetry_category: PACKAGE
+    severity: blocking
+    owner: spike-runner
+  - id: CANDIDATE_SUITABILITY_UNSUPPORTED
+    applies_to: accepted_run
+    outcome_field: run_terminal_state
+    outcome: BLOCKED
+    retryable: false
+    user_action: replace_input
+    http_problem_code: candidate_suitability_unsupported
+    message_key: cause.candidate.suitability_unsupported
+    telemetry_category: INPUT
+    severity: blocking
+    owner: spike-runner
 quality_findings:
+  - id: RASTER_UNTAGGED_ASSUMED_SRGB
+    category: INPUT
+    severity: info
+    repair: provide_embedded_icc_or_png_srgb
+    message_key: finding.input.raster_untagged_assumed_srgb
+    owner: spike-runner
   - id: INPUT_POSE_OUTSIDE_ENVELOPE
     category: INPUT
     severity: blocking

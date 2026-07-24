@@ -1,0 +1,12 @@
+{
+  "format": "oneclick2d.simple-cutout-comparator-config",
+  "format_version": "0.2.0",
+  "profile_id": "oc2d.spike.simple-cutout-comparator.v1",
+  "required_pillow_version": "12.1.0",
+  "frame_sequence": {
+    "format": "oneclick2d.gate-f-frame-sequence-config",
+    "format_version": "0.1.0",
+    "profile_id": "oc2d.spike.gate-f-frame-sequence.v1",
+    "seed_u64": "00000000000000000042"
+  }
+}

@@ -1,0 +1,24 @@
+# Disposable WSL2 inference profile for See-through commit
+# 58a1cb11d13f85acec9bbddb8cd4b6487843d4cf.
+# Install torch/torchvision/torchaudio from the cu128 index first.
+accelerate==1.13.0
+bitsandbytes==0.49.2
+diffusers==0.37.0
+einops==0.8.2
+huggingface-hub==1.7.2
+kornia==0.8.2
+matplotlib==3.9.4
+numpy==2.2.6
+opencv-python==4.13.0.92
+pillow==12.1.1
+psd-tools==1.14.2
+pyyaml==6.0.3
+safetensors==0.7.0
+scikit-image==0.25.2
+scikit-learn==1.7.2
+scipy==1.15.3
+timm @ git+https://github.com/huggingface/pytorch-image-models@6e3fdda39508db30766f9d9e6ec32380ebee8b8c
+torch==2.8.0+cu128
+torchaudio==2.8.0+cu128
+torchvision==0.23.0+cu128
+transformers==5.0.0
