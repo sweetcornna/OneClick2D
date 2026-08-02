@@ -15,13 +15,21 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urlsplit
 
-from .acceptance import verify_bundle
+from .acceptance import verified_bundle_artifact_bytes, verify_bundle
 from .contracts import StageContractError
 from .local_preflight import run_local_preflight
 from .local_workbench import MAX_SOURCE_BYTES, PHASES, run_uploaded_workbench
 from .model_psd_validator import MAX_PSD_BYTES
 from .model_workbench import MODEL_PHASES, load_model_workbench_report, run_uploaded_model_workbench
-from .runtime import ID_RE, canonical_json_bytes, read_bounded_file, sha256_file, strict_load_json_bytes
+from .runtime import (
+    ID_RE,
+    canonical_json_bytes,
+    contained_run_path,
+    contained_workspace_path,
+    read_bounded_file,
+    sha256_file,
+    strict_load_json_bytes,
+)
 
 GUI_ROOT = Path(__file__).with_name("gui")
 MAX_FRAME_BYTES = 32 * 1024 * 1024
@@ -40,7 +48,6 @@ class GuiState:
         self._lock = threading.Lock()
         self._active_run_id: str | None = None
         self._jobs: dict[str, dict[str, object]] = {}
-        self._model_report_cache: dict[str, tuple[tuple[tuple[object, ...], ...], dict[str, object]]] = {}
         self.running = False
 
     def run_preflight(self, run_id: str) -> dict[str, object]:
@@ -62,6 +69,7 @@ class GuiState:
         media_type: str,
         workflow: str = "baseline",
     ) -> dict[str, object]:
+        self._validate_run_id(run_id)
         if workflow not in {"baseline", "model"}:
             raise StageContractError("WORKFLOW_UNSUPPORTED")
         with self._lock:
@@ -144,20 +152,20 @@ class GuiState:
             for result_path in self.workspace_root.glob("*/model-result.json"):
                 try:
                     run_id = result_path.parent.name
-                    if not ID_RE.fullmatch(run_id):
-                        continue
+                    run_dir = self._contained_run_directory(run_id)
+                    self._contained_run_file(run_id, "model-result.json")
                     model_run_ids.add(run_id)
-                    if result_path.is_symlink() or result_path.parent.is_symlink():
-                        continue
-                    discovered[run_id] = self._model_report(result_path.parent)
+                    discovered[run_id] = self._model_report(run_dir)
                 except (OSError, ValueError, TypeError, StageContractError):
                     continue
             for report_path in self.workspace_root.glob("*/workbench-report.json"):
                 try:
                     run_id = report_path.parent.name
-                    if run_id in model_run_ids or report_path.is_symlink() or report_path.parent.is_symlink() or not ID_RE.fullmatch(run_id):
+                    if run_id in model_run_ids:
                         continue
-                    value = self._baseline_report(report_path.parent)
+                    run_dir = self._contained_run_directory(run_id)
+                    self._contained_run_file(run_id, "workbench-report.json")
+                    value = self._baseline_report(run_dir)
                     discovered[run_id] = value
                 except (OSError, ValueError, TypeError, StageContractError):
                     continue
@@ -176,11 +184,13 @@ class GuiState:
             job = self._jobs.get(run_id)
             if job is not None and job.get("state") != "completed":
                 return copy.deepcopy(job)
-        run_dir = self.workspace_root / run_id
+        run_dir = self._contained_run_directory(run_id)
         result = run_dir / "model-result.json"
-        if result.is_file() or result.is_symlink():
+        if result.exists() or result.is_symlink():
+            self._contained_run_file(run_id, "model-result.json")
             value = self._model_report(run_dir)
         else:
+            self._contained_run_file(run_id, "workbench-report.json")
             value = self._baseline_report(run_dir)
         if value.get("run_id") != run_id:
             raise StageContractError("invalid workbench report")
@@ -197,10 +207,11 @@ class GuiState:
         digest = descriptor.get("sha256")
         if not isinstance(media_type, str) or not isinstance(uri, str) or isinstance(length, bool) or not isinstance(length, int) or not isinstance(digest, str):
             raise StageContractError("workbench artifact descriptor is invalid")
-        run_dir = self.workspace_root / run_id
-        path = run_dir / Path(uri)
-        resolved = path.resolve()
-        if path.is_symlink() or not path.is_file() or run_dir.resolve() not in resolved.parents or path.stat().st_size != length or sha256_file(path) != digest:
+        try:
+            path = self._contained_run_file(run_id, uri)
+        except StageContractError as exc:
+            raise StageContractError("workbench artifact is invalid") from exc
+        if path.stat().st_size != length or sha256_file(path) != digest:
             raise StageContractError("workbench artifact is invalid")
         maximum = MAX_PSD_BYTES if media_type == "image/vnd.adobe.photoshop" else MAX_FRAME_BYTES
         filename = None
@@ -268,9 +279,14 @@ class GuiState:
     def list_bundles(self) -> list[dict[str, object]]:
         if not self.workspace_root.exists():
             return []
+        candidates: list[Path] = []
+        for entry in self.workspace_root.glob("*.bundle"):
+            try:
+                candidates.append(self.resolve_bundle(entry.name))
+            except StageContractError:
+                continue
         bundles = []
-        candidates = [directory for directory in self.workspace_root.glob("*.bundle") if directory.is_dir() and not directory.is_symlink()]
-        for directory in sorted(candidates, key=lambda item: item.stat().st_mtime_ns, reverse=True):
+        for directory in sorted(candidates, key=lambda item: item.lstat().st_mtime_ns, reverse=True):
             try:
                 report = verify_bundle(directory)
             except (OSError, ValueError, TypeError, StageContractError):
@@ -281,19 +297,19 @@ class GuiState:
     def bundle_summary(self, bundle_name: str) -> dict[str, object]:
         directory = self.resolve_bundle(bundle_name)
         acceptance = verify_bundle(directory)
-        candidate = self._json(directory / "candidate-report.json")
-        comparator = self._json(directory / "comparator-report.json")
-        statistics = self._json(directory / "paired-statistics.json")
-        psd = self._json(directory / "psd-readback.json")
+        candidate = self._json(self._contained_bundle_file(bundle_name, "candidate-report.json"))
+        comparator = self._json(self._contained_bundle_file(bundle_name, "comparator-report.json"))
+        statistics = self._json(self._contained_bundle_file(bundle_name, "paired-statistics.json"))
+        psd = self._json(self._contained_bundle_file(bundle_name, "psd-readback.json"))
         return {"bundle": bundle_name, "acceptance": acceptance, "candidate": candidate, "comparator": comparator, "statistics": statistics, "psd": psd}
 
     def resolve_bundle(self, bundle_name: str) -> Path:
         if not bundle_name.endswith(".bundle") or not ID_RE.fullmatch(bundle_name[:-7]):
             raise StageContractError("invalid bundle name")
-        directory = self.workspace_root / bundle_name
-        if directory.is_symlink() or not directory.is_dir():
-            raise StageContractError("unknown bundle")
-        return directory
+        try:
+            return contained_workspace_path(self.workspace_root, bundle_name, kind="directory")
+        except ValueError as exc:
+            raise StageContractError("unknown bundle") from exc
 
     def frame_bytes(self, bundle_name: str, arm: str, index_text: str) -> bytes:
         if arm not in {"candidate", "comparator"} or not index_text.isdigit():
@@ -302,53 +318,38 @@ class GuiState:
         if not 0 <= index < 37:
             raise StageContractError("frame index is outside the sequence")
         directory = self.resolve_bundle(bundle_name)
-        return read_bounded_file(directory / f"{arm}-frame-{index:03d}.png", MAX_FRAME_BYTES)
+        return verified_bundle_artifact_bytes(directory, f"{arm}-frame-{index:03d}.png", MAX_FRAME_BYTES)
+
+    def _contained_bundle_file(self, bundle_name: str, relative: str) -> Path:
+        try:
+            return contained_workspace_path(self.workspace_root, f"{bundle_name}/{relative}", kind="file")
+        except ValueError as exc:
+            raise StageContractError("bundle artifact is invalid") from exc
 
     @staticmethod
     def _validate_run_id(run_id: str) -> None:
         if not ID_RE.fullmatch(run_id):
             raise StageContractError("invalid run ID")
 
-    def _model_report(self, run_dir: Path) -> dict[str, object]:
-        identity = self._model_cache_identity(run_dir)
-        with self._lock:
-            cached = self._model_report_cache.get(run_dir.name)
-            if cached is not None and cached[0] == identity:
-                return copy.deepcopy(cached[1])
-        value = load_model_workbench_report(run_dir)
-        if self._model_cache_identity(run_dir) != identity:
-            raise StageContractError("model workbench evidence changed during validation")
-        with self._lock:
-            self._model_report_cache[run_dir.name] = (identity, copy.deepcopy(value))
-        return copy.deepcopy(value)
+    def _contained_run_directory(self, run_id: str) -> Path:
+        try:
+            return contained_run_path(self.workspace_root, run_id, kind="directory")
+        except ValueError as exc:
+            raise StageContractError("invalid workbench run directory") from exc
 
-    @staticmethod
-    def _model_cache_identity(run_dir: Path) -> tuple[tuple[object, ...], ...]:
-        if run_dir.is_symlink() or not run_dir.is_dir():
-            raise StageContractError("model workbench run directory is invalid")
-        entries: list[tuple[object, ...]] = []
-        for path in (run_dir, *sorted(run_dir.rglob("*"))):
-            info = path.lstat()
-            relative = "." if path == run_dir else path.relative_to(run_dir).as_posix()
-            digest = sha256_file(path) if path.is_file() and not path.is_symlink() else None
-            entries.append(
-                (
-                    relative,
-                    info.st_mode,
-                    info.st_dev,
-                    info.st_ino,
-                    info.st_size,
-                    info.st_mtime_ns,
-                    info.st_ctime_ns,
-                    digest,
-                )
-            )
-        return tuple(entries)
+    def _contained_run_file(self, run_id: str, relative: str) -> Path:
+        try:
+            return contained_run_path(self.workspace_root, run_id, relative, kind="file")
+        except ValueError as exc:
+            raise StageContractError("invalid workbench artifact path") from exc
+
+    def _model_report(self, run_dir: Path) -> dict[str, object]:
+        run_dir = self._contained_run_directory(run_dir.name)
+        return load_model_workbench_report(run_dir)
 
     def _baseline_report(self, run_dir: Path) -> dict[str, object]:
-        report_path = run_dir / "workbench-report.json"
-        if run_dir.is_symlink() or not run_dir.is_dir() or report_path.is_symlink():
-            raise StageContractError("invalid workbench report")
+        run_dir = self._contained_run_directory(run_dir.name)
+        report_path = self._contained_run_file(run_dir.name, "workbench-report.json")
         value = self._json(report_path)
         if (
             value.get("run_id") != run_dir.name

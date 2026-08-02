@@ -44,8 +44,12 @@
   },
   "entrypoint": {
     "path": "see_through_v3_nf4_source_preserve_v4.py",
-    "sha256": "aedb9e25adc7aeee3cf2695c72ec830b5e0562c7c6249d2855ea94164c909c31",
-    "upstream_script": "inference/scripts/inference_psd_quantized.py"
+    "sha256": "ae4d26b042b8b15e7bdcfdacd11c50b16d97c1ccf19aad94162dd67046e1642f",
+    "upstream_script": "inference/scripts/inference_psd_quantized.py",
+    "device_policy": {
+      "path": "nf4_marigold_device_policy.py",
+      "sha256": "569e0ced8bcc4b144bfc787e0e37f2d90fc263081ceac3c063eabf26ce1c14df"
+    }
   },
   "models": [
     {

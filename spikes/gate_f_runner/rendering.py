@@ -11,7 +11,13 @@ from .contracts import ArtifactRef, StageContext, StageContractError
 from .raster import _verify_output_png
 
 RENDERER_CONTRACT_ID = "oc2d.spike.pillow-rgba-renderer.v1"
-RENDERER_PROFILE_ID = "pillow-12.1.0-bilinear-straight-srgb-source-over.v1"
+STRAIGHT_RENDERER_PROFILE_ID = "pillow-12.1.0-bilinear-straight-srgb-source-over.v1"
+PREMULTIPLIED_RENDERER_PROFILE_ID = "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2"
+RENDERER_PROFILE_ID = PREMULTIPLIED_RENDERER_PROFILE_ID
+_RENDERER_FILTER_MODES = {
+    STRAIGHT_RENDERER_PROFILE_ID: False,
+    PREMULTIPLIED_RENDERER_PROFILE_ID: True,
+}
 
 
 @dataclass(frozen=True)
@@ -72,8 +78,12 @@ def render_rgba_layers(
     backend: Any,
     context: StageContext | None,
     *,
-    premultiply_alpha: bool = False,
+    profile_id: str = RENDERER_PROFILE_ID,
 ) -> Any:
+    try:
+        premultiply_alpha = _RENDERER_FILTER_MODES[profile_id]
+    except KeyError as exc:
+        raise StageContractError("renderer profile is unsupported") from exc
     result = base.copy()
     for layer in layers:
         if context is not None:

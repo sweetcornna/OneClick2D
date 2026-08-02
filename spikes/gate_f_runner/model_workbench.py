@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Callable
@@ -35,12 +37,16 @@ from .model_worker import (
     _validated_entrypoint,
     run_model_worker,
 )
-from .raster import build_raster_registry
+from .raster import _load_pillow, build_raster_registry
 from .runner import PipelineRunner
 from .runtime import (
     ID_RE,
+    MAX_JSON_BYTES,
     SHA256_RE,
     canonical_json_bytes,
+    contained_run_path,
+    contained_workspace_path,
+    prepare_regular_directory,
     read_bounded_file,
     sha256_bytes,
     sha256_file,
@@ -63,12 +69,47 @@ MODEL_CANVAS_SIZE = 1280
 MODEL_VISIBLE_ALPHA_THRESHOLD = 15
 MODEL_NEUTRAL_EXACT_RATIO_MINIMUM = 0.995
 MODEL_NEUTRAL_RGB_MAE_MAXIMUM = 0.5
+TRUSTED_MODEL_SOURCE_NAME = "trusted-model-source.png"
+TRUSTED_MODEL_SOURCE_CANONICALIZATION = "transparent-center-pad-pillow-bilinear-up-box-down.v1"
+MODEL_SOURCE_REASON_CODES = frozenset(
+    {
+        "MODEL_TRUSTED_SOURCE_EVIDENCE_MISSING",
+        "MODEL_TRUSTED_SOURCE_IDENTITY_MISMATCH",
+        "MODEL_TRUSTED_SOURCE_CANONICAL_MISMATCH",
+        "MODEL_SOURCE_REFERENCE_RGBA_MISMATCH",
+    }
+)
+NORMALIZATION_SOURCE_URI = "inputs/source.bin"
+NORMALIZATION_RASTER_URI = "committed/stage.raster-normalize/attempt.001/normalized.png"
+NORMALIZATION_REPORT_URI = "committed/stage.raster-normalize/attempt.001/normalization-report.json"
+NORMALIZATION_ARTIFACT_LIMITS = {
+    NORMALIZATION_SOURCE_URI: MAX_SOURCE_BYTES,
+    NORMALIZATION_RASTER_URI: 64 * 1024 * 1024,
+    NORMALIZATION_REPORT_URI: MAX_JSON_BYTES,
+}
+NORMALIZATION_DIRECTORY_INVENTORY = {
+    "inputs": frozenset({"source.bin"}),
+    "committed": frozenset({"stage.raster-normalize"}),
+    "committed/stage.raster-normalize": frozenset({"attempt.001"}),
+    "committed/stage.raster-normalize/attempt.001": frozenset(
+        {"normalized.png", "normalization-report.json"}
+    ),
+}
 
 
 def _publish_json(path: Path, value: dict[str, object]) -> None:
     temporary = path.with_name(f"{path.name}.tmp")
     temporary.write_bytes(canonical_json_bytes(value))
     os.replace(temporary, path)
+
+
+def _publish_bytes(path: Path, value: bytes) -> None:
+    temporary = path.with_name(f"{path.name}.tmp")
+    try:
+        temporary.write_bytes(value)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _normalization_run_spec(source: bytes, media_type: str, normalize: bytes) -> bytes:
@@ -167,10 +208,14 @@ def _normalize_upload(
 
 def _indexed_files(run_dir: Path, result: dict[str, object]) -> dict[str, tuple[Path, dict[str, object]]]:
     values = result.get("files")
-    output_root = run_dir / "model-output"
-    if not isinstance(values, list) or not values or output_root.is_symlink() or not output_root.is_dir():
+    try:
+        output_root = contained_workspace_path(run_dir, "model-output", kind="directory")
+    except ValueError as exc:
+        raise StageContractError("model workbench file inventory is invalid") from exc
+    if not isinstance(values, list) or not values:
         raise StageContractError("model workbench file inventory is invalid")
-    indexed: dict[str, tuple[Path, dict[str, object]]] = {}
+
+    descriptors: dict[str, dict[str, object]] = {}
     total = 0
     for value in values:
         if not isinstance(value, dict) or set(value) != {"uri", "byte_length", "sha256"}:
@@ -178,40 +223,75 @@ def _indexed_files(run_dir: Path, result: dict[str, object]) -> dict[str, tuple[
         uri = value.get("uri")
         length = value.get("byte_length")
         digest = value.get("sha256")
+        uri_parts = uri.split("/") if isinstance(uri, str) else ()
         if (
             not isinstance(uri, str)
             or not uri
             or "\\" in uri
-            or Path(uri).is_absolute()
-            or ".." in Path(uri).parts
+            or uri.startswith("/")
+            or any(part in {"", ".", ".."} or ":" in part for part in uri_parts)
             or isinstance(length, bool)
             or not isinstance(length, int)
             or not 0 <= length <= MAX_MODEL_RESULT_BYTES
             or not isinstance(digest, str)
             or SHA256_RE.fullmatch(digest) is None
-            or uri in indexed
+            or uri in descriptors
         ):
             raise StageContractError("model workbench file descriptor is invalid")
-        path = output_root / Path(uri)
-        resolved = path.resolve()
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or output_root.resolve() not in resolved.parents
-            or path.stat().st_size != length
-            or sha256_file(path) != digest
-        ):
-            raise StageContractError("model workbench artifact does not match its inventory")
         total += length
         if total > MAX_MODEL_RESULT_BYTES:
             raise StageContractError("model workbench output exceeded its bound")
-        indexed[uri] = (path, value)
-    output_paths = list(output_root.rglob("*"))
-    if any(path.is_symlink() for path in output_paths):
-        raise StageContractError("model workbench output contains a symlink")
-    actual = {path.relative_to(output_root).as_posix() for path in output_paths if path.is_file()}
-    if actual != set(indexed):
+        descriptors[uri] = value
+
+    actual: dict[str, Path] = {}
+    pending = [output_root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = sorted(directory.iterdir(), key=lambda path: path.name)
+        except (OSError, RuntimeError) as exc:
+            raise StageContractError("model workbench output contains an unsafe entry") from exc
+        for path in entries:
+            relative = path.relative_to(output_root).as_posix()
+            try:
+                info = path.lstat()
+                if stat.S_ISDIR(info.st_mode):
+                    kind = "directory"
+                elif stat.S_ISREG(info.st_mode):
+                    kind = "file"
+                else:
+                    raise ValueError("model output entry is not regular")
+                contained_workspace_path(run_dir, f"model-output/{relative}", kind=kind)
+            except (OSError, RuntimeError, ValueError) as exc:
+                message = (
+                    "model workbench artifact does not match its inventory"
+                    if relative in descriptors or any(uri.startswith(f"{relative}/") for uri in descriptors)
+                    else "model workbench output contains an unsafe entry"
+                )
+                raise StageContractError(message) from exc
+            if kind == "directory":
+                pending.append(path)
+            else:
+                actual[relative] = path
+
+    described = set(descriptors)
+    discovered = set(actual)
+    if described - discovered:
+        raise StageContractError("model workbench artifact does not match its inventory")
+    if discovered - described:
         raise StageContractError("model workbench file inventory is incomplete")
+
+    indexed: dict[str, tuple[Path, dict[str, object]]] = {}
+    for uri, descriptor in descriptors.items():
+        path = actual[uri]
+        try:
+            path = contained_workspace_path(run_dir, f"model-output/{uri}", kind="file")
+            length = path.stat().st_size
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise StageContractError("model workbench artifact does not match its inventory") from exc
+        if length != descriptor["byte_length"] or sha256_file(path) != descriptor["sha256"]:
+            raise StageContractError("model workbench artifact does not match its inventory")
+        indexed[uri] = (path, descriptor)
     return indexed
 
 
@@ -253,6 +333,236 @@ def _png_facts(path: Path, expected_mode: str | tuple[str, ...]) -> dict[str, ob
         raise StageContractError("model workbench PNG is invalid") from exc
 
 
+def _rgba_pixels(data: bytes, expected_size: tuple[int, int], label: str) -> bytes:
+    try:
+        backend = _load_pillow()
+        with backend.Image.open(io.BytesIO(data), formats=("PNG",)) as image:
+            if (
+                image.format != "PNG"
+                or image.mode != "RGBA"
+                or image.size != expected_size
+                or getattr(image, "n_frames", 1) != 1
+            ):
+                raise StageContractError(f"model workbench {label} is outside its profile")
+            image.load()
+            return image.tobytes()
+    except StageContractError:
+        raise
+    except Exception as exc:
+        raise StageContractError(f"model workbench {label} is invalid") from exc
+
+
+def _canonical_source_png_bytes(source_path: Path) -> bytes:
+    try:
+        source_data = read_bounded_file(source_path, NORMALIZATION_ARTIFACT_LIMITS[NORMALIZATION_RASTER_URI])
+        backend = _load_pillow()
+        with backend.Image.open(io.BytesIO(source_data), formats=("PNG",)) as image:
+            if (
+                image.format != "PNG"
+                or image.mode != "RGBA"
+                or image.width <= 0
+                or image.height <= 0
+                or image.width > 2048
+                or image.height > 2048
+                or image.width * image.height > 4_194_304
+                or getattr(image, "n_frames", 1) != 1
+            ):
+                raise StageContractError("model workbench normalized source is outside its profile")
+            image.load()
+            normalized = image.copy()
+
+        side = max(normalized.size)
+        canvas = backend.Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        try:
+            canvas.paste(normalized, ((side - normalized.width) // 2, (side - normalized.height) // 2))
+            if side == MODEL_CANVAS_SIZE:
+                canonical = canvas.copy()
+            else:
+                resample = (
+                    backend.Image.Resampling.BILINEAR
+                    if side < MODEL_CANVAS_SIZE
+                    else backend.Image.Resampling.BOX
+                )
+                channels = canvas.split()
+                resized_channels = []
+                try:
+                    resized_channels = [
+                        channel.resize((MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE), resample=resample)
+                        for channel in channels
+                    ]
+                    canonical = backend.Image.merge("RGBA", resized_channels)
+                finally:
+                    for channel in (*channels, *resized_channels):
+                        channel.close()
+        finally:
+            normalized.close()
+            canvas.close()
+
+        try:
+            stream = io.BytesIO()
+            pnginfo = backend.PngImagePlugin.PngInfo()
+            pnginfo.add(b"sRGB", b"\x00")
+            canonical.save(
+                stream,
+                format="PNG",
+                optimize=False,
+                compress_level=9,
+                pnginfo=pnginfo,
+                icc_profile=None,
+                exif=b"",
+            )
+            return stream.getvalue()
+        finally:
+            canonical.close()
+    except StageContractError:
+        raise
+    except Exception as exc:
+        raise StageContractError("model workbench canonical source construction failed") from exc
+
+
+def _trusted_source_artifact(
+    run_dir: Path,
+) -> tuple[Path, dict[str, object], bytes] | None:
+    candidate = run_dir / TRUSTED_MODEL_SOURCE_NAME
+    if not candidate.exists() and not candidate.is_symlink():
+        return None
+    try:
+        path = contained_run_path(
+            run_dir.parent,
+            run_dir.name,
+            TRUSTED_MODEL_SOURCE_NAME,
+            kind="file",
+        )
+    except ValueError as exc:
+        raise StageContractError("model workbench trusted source path is invalid") from exc
+    data = read_bounded_file(path, NORMALIZATION_ARTIFACT_LIMITS[NORMALIZATION_RASTER_URI])
+    pixels = _rgba_pixels(data, (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE), "trusted source")
+    return (
+        path,
+        {
+            "id": "trusted-model-source",
+            "kind": "trusted-model-source",
+            "media_type": "image/png",
+            "uri": TRUSTED_MODEL_SOURCE_NAME,
+            "sha256": sha256_bytes(data),
+            "byte_length": len(data),
+            "width": MODEL_CANVAS_SIZE,
+            "height": MODEL_CANVAS_SIZE,
+            "mode": "RGBA",
+        },
+        pixels,
+    )
+
+
+def _normalization_artifact_path(run_dir: Path, normalization: dict[str, object]) -> Path:
+    if (
+        set(normalization) != {"id", "kind", "media_type", "uri", "sha256", "byte_length"}
+        or normalization.get("id") != "normalized"
+        or normalization.get("kind") != "image"
+        or normalization.get("media_type") != "image/png"
+        or normalization.get("uri") != NORMALIZATION_RASTER_URI
+        or not isinstance(normalization.get("sha256"), str)
+        or SHA256_RE.fullmatch(str(normalization["sha256"])) is None
+        or isinstance(normalization.get("byte_length"), bool)
+        or not isinstance(normalization.get("byte_length"), int)
+    ):
+        raise StageContractError("model workbench normalized source descriptor is invalid")
+    try:
+        path = contained_run_path(
+            run_dir.parent,
+            run_dir.name,
+            NORMALIZATION_RASTER_URI,
+            kind="file",
+        )
+    except ValueError as exc:
+        raise StageContractError("model workbench normalized source path is invalid") from exc
+    data = read_bounded_file(path, NORMALIZATION_ARTIFACT_LIMITS[NORMALIZATION_RASTER_URI])
+    if len(data) != normalization["byte_length"] or sha256_bytes(data) != normalization["sha256"]:
+        raise StageContractError("model workbench normalized source artifact does not match")
+    return path
+
+
+def _source_trust(
+    run_dir: Path,
+    result: dict[str, object],
+    model_source_path: Path,
+    normalization: dict[str, object] | None,
+) -> tuple[dict[str, object] | None, dict[str, object], Path]:
+    model_source_data = read_bounded_file(
+        model_source_path,
+        NORMALIZATION_ARTIFACT_LIMITS[NORMALIZATION_RASTER_URI],
+    )
+    model_source_pixels = _rgba_pixels(
+        model_source_data,
+        (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE),
+        "model source reference",
+    )
+    model_source_rgba_sha256 = sha256_bytes(model_source_pixels)
+    trusted = _trusted_source_artifact(run_dir)
+    reasons: list[str] = []
+    normalized_source_sha256: str | None = None
+
+    if trusted is None:
+        reasons.append("MODEL_TRUSTED_SOURCE_EVIDENCE_MISSING")
+        trusted_descriptor = None
+        trusted_rgba_sha256 = None
+        exact_reference_match = False
+        fidelity_source_path = model_source_path
+    else:
+        trusted_path, trusted_descriptor, trusted_pixels = trusted
+        trusted_rgba_sha256 = sha256_bytes(trusted_pixels)
+        fidelity_source_path = trusted_path
+        if trusted_descriptor["sha256"] != result.get("source_sha256"):
+            reasons.append("MODEL_TRUSTED_SOURCE_IDENTITY_MISMATCH")
+        if normalization is not None:
+            normalized_source_path = _normalization_artifact_path(run_dir, normalization)
+            normalized_source_sha256 = str(normalization["sha256"])
+            canonical_data = _canonical_source_png_bytes(normalized_source_path)
+            canonical_pixels = _rgba_pixels(
+                canonical_data,
+                (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE),
+                "canonical source",
+            )
+            if canonical_pixels != trusted_pixels:
+                reasons.append("MODEL_TRUSTED_SOURCE_CANONICAL_MISMATCH")
+        exact_reference_match = trusted_pixels == model_source_pixels
+        if not exact_reference_match:
+            reasons.append("MODEL_SOURCE_REFERENCE_RGBA_MISMATCH")
+
+    if any(reason not in MODEL_SOURCE_REASON_CODES for reason in reasons):
+        raise StageContractError("model workbench source trust reason is invalid")
+    evidence = {
+        "status": "pass" if not reasons else "review_required",
+        "reason_codes": reasons,
+        "canonicalization_algorithm": TRUSTED_MODEL_SOURCE_CANONICALIZATION,
+        "evidence_origin": (
+            "missing"
+            if trusted is None
+            else "retained_normalized_input"
+            if normalization is not None
+            else "imported_retained_model_input"
+        ),
+        "normalized_source_sha256": normalized_source_sha256,
+        "trusted_source_rgba_sha256": trusted_rgba_sha256,
+        "model_source_reference_rgba_sha256": model_source_rgba_sha256,
+        "exact_rgba_match": exact_reference_match,
+    }
+    return trusted_descriptor, evidence, fidelity_source_path
+
+
+def _rgb_mismatch_mask(difference: object) -> object:
+    from PIL import ImageChops
+
+    channels = difference.split()
+    red_green = ImageChops.lighter(channels[0], channels[1])
+    try:
+        return ImageChops.lighter(red_green, channels[2])
+    finally:
+        red_green.close()
+        for channel in channels:
+            channel.close()
+
+
 def _neutral_fidelity(source_path: Path, reconstruction_path: Path) -> dict[str, object]:
     from PIL import Image, ImageChops, ImageStat
 
@@ -268,35 +578,67 @@ def _neutral_fidelity(source_path: Path, reconstruction_path: Path) -> dict[str,
             source = source_image.convert("RGBA")
             reconstruction = reconstruction_image.convert("RGBA")
 
-        visible_mask = reconstruction.getchannel("A").point(
-            lambda value: 255 if value > MODEL_VISIBLE_ALPHA_THRESHOLD else 0
-        )
-        visible_pixels = visible_mask.histogram()[255]
-        if visible_pixels <= 0:
-            raise StageContractError("model workbench reconstruction has no visible pixels")
-        difference = ImageChops.difference(source.convert("RGB"), reconstruction.convert("RGB"))
-        channel_mae = ImageStat.Stat(difference, mask=visible_mask).mean
-        exact_pixels = difference.convert("L").histogram(mask=visible_mask)[0]
-        exact_ratio = exact_pixels / visible_pixels
-        rgb_mae = sum(channel_mae) / len(channel_mae)
-        status = (
-            "pass"
-            if exact_ratio >= MODEL_NEUTRAL_EXACT_RATIO_MINIMUM and rgb_mae <= MODEL_NEUTRAL_RGB_MAE_MAXIMUM
-            else "review_required"
-        )
-        return {
-            "status": status,
-            "alpha_threshold": MODEL_VISIBLE_ALPHA_THRESHOLD,
-            "visible_pixel_count": visible_pixels,
-            "visible_canvas_ratio": round(visible_pixels / (MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE), 6),
-            "source_rgb_exact_ratio": round(exact_ratio, 6),
-            "source_rgb_mae": round(rgb_mae, 6),
-            "source_rgb_channel_mae": [round(value, 6) for value in channel_mae],
-            "pass_thresholds": {
-                "source_rgb_exact_ratio_minimum": MODEL_NEUTRAL_EXACT_RATIO_MINIMUM,
-                "source_rgb_mae_maximum": MODEL_NEUTRAL_RGB_MAE_MAXIMUM,
-            },
-        }
+        try:
+            with source.getchannel("A") as source_alpha, reconstruction.getchannel("A") as reconstruction_alpha:
+                with source_alpha.point(
+                    lambda value: 255 if value > MODEL_VISIBLE_ALPHA_THRESHOLD else 0
+                ) as source_visible_mask, reconstruction_alpha.point(
+                    lambda value: 255 if value > MODEL_VISIBLE_ALPHA_THRESHOLD else 0
+                ) as reconstruction_visible_mask:
+                    source_visible_pixels = source_visible_mask.histogram()[255]
+                    reconstruction_visible_pixels = reconstruction_visible_mask.histogram()[255]
+                    if source_visible_pixels <= 0:
+                        raise StageContractError("model workbench source has no visible pixels")
+                    with ImageChops.multiply(source_visible_mask, reconstruction_visible_mask) as covered_mask:
+                        covered_pixels = covered_mask.histogram()[255]
+                    coverage_ratio = covered_pixels / source_visible_pixels
+                    with source.convert("RGB") as source_rgb, reconstruction.convert("RGB") as reconstruction_rgb:
+                        with ImageChops.difference(source_rgb, reconstruction_rgb) as difference:
+                            with _rgb_mismatch_mask(difference) as mismatch_mask:
+                                channel_mae = ImageStat.Stat(difference, mask=source_visible_mask).mean
+                                exact_pixels = mismatch_mask.histogram(mask=source_visible_mask)[0]
+            exact_ratio = exact_pixels / source_visible_pixels
+            rgb_mae = sum(channel_mae) / len(channel_mae)
+            status = (
+                "pass"
+                if coverage_ratio == 1.0
+                and exact_ratio >= MODEL_NEUTRAL_EXACT_RATIO_MINIMUM
+                and rgb_mae <= MODEL_NEUTRAL_RGB_MAE_MAXIMUM
+                else "review_required"
+            )
+            return {
+                "status": status,
+                "alpha_threshold": MODEL_VISIBLE_ALPHA_THRESHOLD,
+                "visible_pixel_count": reconstruction_visible_pixels,
+                "visible_canvas_ratio": round(
+                    reconstruction_visible_pixels / (MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE),
+                    6,
+                ),
+                "source_visible_pixel_count": source_visible_pixels,
+                "source_visible_canvas_ratio": round(
+                    source_visible_pixels / (MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE),
+                    6,
+                ),
+                "reconstruction_visible_pixel_count": reconstruction_visible_pixels,
+                "reconstruction_visible_canvas_ratio": round(
+                    reconstruction_visible_pixels / (MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE),
+                    6,
+                ),
+                "source_visible_covered_pixel_count": covered_pixels,
+                "source_visible_omission_count": source_visible_pixels - covered_pixels,
+                "source_visible_coverage_ratio": round(coverage_ratio, 6),
+                "source_rgb_exact_ratio": round(exact_ratio, 6),
+                "source_rgb_mae": round(rgb_mae, 6),
+                "source_rgb_channel_mae": [round(value, 6) for value in channel_mae],
+                "pass_thresholds": {
+                    "source_visible_coverage_ratio_minimum": 1.0,
+                    "source_rgb_exact_ratio_minimum": MODEL_NEUTRAL_EXACT_RATIO_MINIMUM,
+                    "source_rgb_mae_maximum": MODEL_NEUTRAL_RGB_MAE_MAXIMUM,
+                },
+            }
+        finally:
+            source.close()
+            reconstruction.close()
     except StageContractError:
         raise
     except Exception as exc:
@@ -353,10 +695,59 @@ def _validate_psd_metadata(
             raise StageContractError("model workbench PSD metadata is invalid")
 
 
+def _manifest_artifact_descriptor(value: object) -> tuple[str, int, str]:
+    if not isinstance(value, dict) or set(value) != {"role", "media_type", "uri", "sha256", "byte_length"}:
+        raise StageContractError("model workbench normalization manifest descriptor is invalid")
+    uri = value.get("uri")
+    length = value.get("byte_length")
+    digest = value.get("sha256")
+    maximum = NORMALIZATION_ARTIFACT_LIMITS.get(uri) if isinstance(uri, str) else None
+    if (
+        not isinstance(value.get("role"), str)
+        or not isinstance(value.get("media_type"), str)
+        or maximum is None
+        or isinstance(length, bool)
+        or not isinstance(length, int)
+        or not 0 <= length <= maximum
+        or not isinstance(digest, str)
+        or SHA256_RE.fullmatch(digest) is None
+    ):
+        raise StageContractError("model workbench normalization manifest descriptor is invalid")
+    return uri, length, digest
+
+
+def _normalization_inventory_paths(run_dir: Path, uris: list[str]) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    try:
+        for uri in uris:
+            paths[uri] = contained_run_path(run_dir.parent, run_dir.name, uri, kind="file")
+        for relative, expected_names in NORMALIZATION_DIRECTORY_INVENTORY.items():
+            directory = contained_run_path(run_dir.parent, run_dir.name, relative, kind="directory")
+            entries = list(directory.iterdir())
+            if {entry.name for entry in entries} != expected_names:
+                raise StageContractError("model workbench normalization manifest inventory is not exact")
+            for entry in entries:
+                child_relative = f"{relative}/{entry.name}"
+                child_kind = "directory" if child_relative in NORMALIZATION_DIRECTORY_INVENTORY else "file"
+                contained_run_path(run_dir.parent, run_dir.name, child_relative, kind=child_kind)
+    except StageContractError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise StageContractError("model workbench normalization manifest URI is invalid") from exc
+    if set(paths) != set(NORMALIZATION_ARTIFACT_LIMITS):
+        raise StageContractError("model workbench normalization manifest inventory is not exact")
+    return paths
+
+
 def _load_normalization_evidence(run_dir: Path) -> tuple[dict[str, object], dict[str, object]]:
-    manifest_path = run_dir / "run-manifest.json"
-    digest_path = run_dir / "run-manifest.sha256"
-    manifest_bytes = read_bounded_file(manifest_path)
+    try:
+        run_dir = contained_run_path(run_dir.parent, run_dir.name, kind="directory")
+        manifest_path = contained_run_path(run_dir.parent, run_dir.name, "run-manifest.json", kind="file")
+        digest_path = contained_run_path(run_dir.parent, run_dir.name, "run-manifest.sha256", kind="file")
+    except ValueError as exc:
+        raise StageContractError("model workbench normalization manifest path is invalid") from exc
+
+    manifest_bytes = read_bounded_file(manifest_path, MAX_JSON_BYTES)
     expected_digest = (sha256_bytes(manifest_bytes) + "\n").encode("ascii")
     if read_bounded_file(digest_path, 65) != expected_digest:
         raise StageContractError("model workbench normalization manifest digest does not match")
@@ -379,15 +770,55 @@ def _load_normalization_evidence(run_dir: Path) -> tuple[dict[str, object], dict
     report_value = _find_output(outputs, role="raster_normalization_report")
     if normalized_value is None or report_value is None:
         raise StageContractError("model workbench normalization output is incomplete")
-    normalized = _descriptor(run_dir, normalized_value, "normalized", "image")
-    report_descriptor = _descriptor(run_dir, report_value, "normalization-report", "json")
-    for descriptor in (normalized, report_descriptor):
-        path = run_dir / str(descriptor["uri"])
-        if run_dir.resolve() not in path.resolve().parents:
-            raise StageContractError("model workbench normalization artifact escaped its run")
-    if normalized.get("media_type") != "image/png" or report_descriptor.get("media_type") != "application/vnd.oneclick2d.raster-normalization-report+json":
-        raise StageContractError("model workbench normalization media type is invalid")
-    report = strict_load_json_bytes(read_bounded_file(run_dir / str(report_descriptor["uri"])))
+
+    source_value = manifest.get("source")
+    result_value = manifest.get("result")
+    manifest_descriptors = [source_value, *outputs, result_value]
+    lexical = [_manifest_artifact_descriptor(value) for value in manifest_descriptors]
+    uris = [item[0] for item in lexical]
+    if (
+        len(outputs) != 2
+        or uris != [NORMALIZATION_SOURCE_URI, NORMALIZATION_RASTER_URI, NORMALIZATION_REPORT_URI, NORMALIZATION_REPORT_URI]
+        or source_value.get("role") != "source_raster"
+        or normalized_value.get("role") != "normalized_raster"
+        or normalized_value.get("media_type") != "image/png"
+        or report_value.get("role") != "raster_normalization_report"
+        or report_value.get("media_type") != "application/vnd.oneclick2d.raster-normalization-report+json"
+        or result_value != report_value
+    ):
+        raise StageContractError("model workbench normalization manifest inventory is not exact")
+
+    paths = _normalization_inventory_paths(run_dir, uris)
+
+    verified: dict[str, bytes] = {}
+    for uri, length, digest in lexical:
+        if uri in verified:
+            continue
+        try:
+            data = read_bounded_file(paths[uri], NORMALIZATION_ARTIFACT_LIMITS[uri])
+        except (OSError, ValueError, TypeError) as exc:
+            raise StageContractError("model workbench normalization artifact does not match the manifest") from exc
+        if len(data) != length or sha256_bytes(data) != digest:
+            raise StageContractError("model workbench normalization artifact does not match the manifest")
+        verified[uri] = data
+
+    normalized = {
+        "id": "normalized",
+        "kind": "image",
+        "media_type": normalized_value["media_type"],
+        "uri": normalized_value["uri"],
+        "sha256": normalized_value["sha256"],
+        "byte_length": normalized_value["byte_length"],
+    }
+    report_descriptor = {
+        "id": "normalization-report",
+        "kind": "json",
+        "media_type": report_value["media_type"],
+        "uri": report_value["uri"],
+        "sha256": report_value["sha256"],
+        "byte_length": report_value["byte_length"],
+    }
+    report = strict_load_json_bytes(verified[str(report_descriptor["uri"])])
     if not isinstance(report, dict):
         raise StageContractError("model workbench normalization report is invalid")
     return normalized, report
@@ -518,8 +949,8 @@ def build_model_workbench_report(
     ):
         raise StageContractError("model workbench result is invalid")
 
-    identity = _identity(result)
     indexed = _indexed_files(run_dir, result)
+    identity = _identity(result)
     info = _strict_json(indexed, "input/input/info.json")
     parts = info.get("parts")
     if (
@@ -671,24 +1102,8 @@ def build_model_workbench_report(
     ) or float(stats["total_time_s"]) < sum(float(stats[key]) for key in timing_keys):
         raise StageContractError("model workbench statistics are invalid")
 
-    neutral_fidelity = _neutral_fidelity(
-        indexed["input/input/src_img.png"][0],
-        indexed["input/input/reconstruction.png"][0],
-    )
-    review_items = [
-        "semantic_correctness",
-        "hidden_region_completion",
-        "external_editor_interoperability",
-        "mesh_generation",
-        "parameter_binding",
-        "dynamic_deformation",
-        "oc2d_package",
-    ]
-    if neutral_fidelity["status"] != "pass":
-        review_items.insert(0, "neutral_visible_pixel_fidelity")
-
     if normalization is not None:
-        if normalization_report is None or normalization.get("sha256") != result.get("source_sha256"):
+        if not isinstance(normalization_report, dict):
             raise StageContractError("model workbench normalized source identity does not match")
         normalization_value: dict[str, object] | None = {
             "input": normalization_report.get("input"),
@@ -703,6 +1118,34 @@ def build_model_workbench_report(
     else:
         normalization_value = None
 
+    trusted_source, source_trust, fidelity_source_path = _source_trust(
+        run_dir,
+        result,
+        indexed["input/input/src_img.png"][0],
+        normalization,
+    )
+    neutral_fidelity = _neutral_fidelity(
+        fidelity_source_path,
+        indexed["input/input/reconstruction.png"][0],
+    )
+    neutral_fidelity["source_trust_status"] = source_trust["status"]
+    neutral_fidelity["reason_codes"] = list(source_trust["reason_codes"])
+    if source_trust["status"] != "pass":
+        neutral_fidelity["status"] = "review_required"
+    review_items = [
+        "semantic_correctness",
+        "hidden_region_completion",
+        "external_editor_interoperability",
+        "mesh_generation",
+        "parameter_binding",
+        "dynamic_deformation",
+        "oc2d_package",
+    ]
+    if neutral_fidelity["status"] != "pass":
+        review_items.insert(0, "neutral_visible_pixel_fidelity")
+    if source_trust["status"] != "pass":
+        review_items.insert(0, "trusted_source_reference")
+
     report: dict[str, object] = {
         "format": "oneclick2d.local-image-workbench-report",
         "format_version": "0.3.0",
@@ -711,18 +1154,21 @@ def build_model_workbench_report(
         "workflow": "model",
         "state": "completed",
         "local_status": "LOCAL_WORKBENCH_COMPLETED",
-        "model_used": True,
+        "model_used": source_trust["status"] == "pass",
         "oc2d_produced": False,
         "gate_f_status": "GATE_F_NOT_EVALUATED",
         "source_retention": (
             "raw_upload_and_model_derived_outputs_retained_until_manual_removal"
             if normalization_value is not None
+            else "trusted_model_input_and_model_derived_outputs_retained_until_manual_removal"
+            if trusted_source is not None
             else "model_derived_outputs_retained_until_manual_removal"
         ),
         "phases": [{"id": phase, "state": "completed"} for phase in phases],
         "model": {
             "identity": identity,
             "source_sha256": result["source_sha256"],
+            "trusted_source": trusted_source,
             "source": source,
             "reconstruction": reconstruction,
             "semantic_intermediate_count": len(layers),
@@ -732,6 +1178,8 @@ def build_model_workbench_report(
         },
         "quality": {
             "status": "review_required",
+            "reason_codes": list(source_trust["reason_codes"]),
+            "source_trust": source_trust,
             "neutral_fidelity": neutral_fidelity,
             "review_items": review_items,
         },
@@ -757,11 +1205,16 @@ def build_model_workbench_report(
 
 
 def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
-    if run_dir.is_symlink() or not run_dir.is_dir() or not ID_RE.fullmatch(run_dir.name):
-        raise StageContractError("model workbench run directory is invalid")
-    result_path = run_dir / MODEL_RESULT_NAME
-    if result_path.is_symlink():
-        raise StageContractError("model workbench result path is invalid")
+    try:
+        run_dir = contained_run_path(run_dir.parent, run_dir.name, kind="directory")
+        result_path = contained_run_path(
+            run_dir.parent,
+            run_dir.name,
+            MODEL_RESULT_NAME,
+            kind="file",
+        )
+    except ValueError as exc:
+        raise StageContractError("model workbench run directory is invalid") from exc
     value = strict_load_json_bytes(read_bounded_file(result_path))
     if not isinstance(value, dict):
         raise StageContractError("model workbench result is invalid")
@@ -770,9 +1223,16 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
     normalization = None
     normalization_report = None
     phases = IMPORTED_MODEL_PHASES
-    if persisted_path.is_symlink():
-        raise StageContractError("model workbench report path is invalid")
-    if persisted_path.is_file():
+    if persisted_path.exists() or persisted_path.is_symlink():
+        try:
+            persisted_path = contained_run_path(
+                run_dir.parent,
+                run_dir.name,
+                WORKBENCH_REPORT_NAME,
+                kind="file",
+            )
+        except ValueError as exc:
+            raise StageContractError("model workbench report path is invalid") from exc
         persisted_value = strict_load_json_bytes(read_bounded_file(persisted_path))
         if not isinstance(persisted_value, dict):
             raise StageContractError("model workbench report is invalid")
@@ -792,6 +1252,10 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
         raise StageContractError("persisted model workbench report does not match validated evidence")
     motion_directory = run_dir / "motion-draft"
     if motion_directory.exists() or motion_directory.is_symlink():
+        try:
+            contained_run_path(run_dir.parent, run_dir.name, "motion-draft", kind="directory")
+        except ValueError as exc:
+            raise StageContractError("model motion draft directory is invalid") from exc
         from .model_motion_draft import load_model_motion_draft_report
 
         motion = load_model_motion_draft_report(
@@ -807,14 +1271,22 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
     return report
 
 
-def run_uploaded_model_workbench(
+def run_normalized_model_workbench(
     workspace_root: Path,
     run_id: str,
     source_bytes: bytes,
     media_type: str,
+    model_worker: Callable[..., dict[str, object]],
+    *,
+    timeout_seconds: int,
     phase_callback: Callable[[str, str], None] | None = None,
-) -> tuple[Path, dict[str, object]]:
-    if not ID_RE.fullmatch(run_id) or media_type not in {"image/png", "image/jpeg"} or not 1 <= len(source_bytes) <= MAX_SOURCE_BYTES:
+) -> tuple[Path, dict[str, object], dict[str, object]]:
+    if (
+        not ID_RE.fullmatch(run_id)
+        or media_type not in {"image/png", "image/jpeg"}
+        or not 1 <= len(source_bytes) <= MAX_SOURCE_BYTES
+        or not 1 <= timeout_seconds <= MODEL_TIMEOUT_SECONDS
+    ):
         raise StageContractError("uploaded model workbench input is invalid")
 
     def notify(phase: str, state: str) -> None:
@@ -824,7 +1296,7 @@ def run_uploaded_model_workbench(
             except Exception:
                 pass
 
-    workspace_root.mkdir(parents=True, exist_ok=True)
+    prepare_regular_directory(workspace_root, create=True)
     notify("UPLOAD_RECEIVED", "completed")
     run_dir, normalized, normalization_report = _normalize_upload(
         workspace_root,
@@ -834,12 +1306,14 @@ def run_uploaded_model_workbench(
         notify,
     )
     normalized_path = run_dir / str(normalized["uri"])
+    trusted_source_path = run_dir / TRUSTED_MODEL_SOURCE_NAME
     output = run_dir / "model-output"
     result_path = run_dir / MODEL_RESULT_NAME
     report_path = run_dir / WORKBENCH_REPORT_NAME
     try:
+        _publish_bytes(trusted_source_path, _canonical_source_png_bytes(normalized_path))
         notify("PINNED_MODEL_INFERENCE", "running")
-        result = run_model_worker(normalized_path, output, timeout_seconds=MODEL_TIMEOUT_SECONDS)
+        result = model_worker(trusted_source_path, output, timeout_seconds=timeout_seconds)
         notify("PINNED_MODEL_INFERENCE", "completed")
         notify("MODEL_ARTIFACT_VALIDATE", "running")
         report = build_model_workbench_report(
@@ -860,4 +1334,23 @@ def run_uploaded_model_workbench(
         result_path.unlink(missing_ok=True)
         report_path.unlink(missing_ok=True)
         raise
+    return report_path, report, result
+
+
+def run_uploaded_model_workbench(
+    workspace_root: Path,
+    run_id: str,
+    source_bytes: bytes,
+    media_type: str,
+    phase_callback: Callable[[str, str], None] | None = None,
+) -> tuple[Path, dict[str, object]]:
+    report_path, report, _ = run_normalized_model_workbench(
+        workspace_root,
+        run_id,
+        source_bytes,
+        media_type,
+        run_model_worker,
+        timeout_seconds=MODEL_TIMEOUT_SECONDS,
+        phase_callback=phase_callback,
+    )
     return report_path, report

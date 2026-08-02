@@ -9,6 +9,7 @@ from fractions import Fraction
 from typing import Iterable
 
 from .contracts import StageContractError
+from .frame_sequence import build_gate_f_frame_sequence, parse_gate_f_frame_sequence_config
 from .runtime import canonical_json_bytes, digest_framed
 
 
@@ -37,6 +38,48 @@ class PairOutcome:
     outcome: str
     f_usable: bool
     reason: str
+
+
+def arm_identity_from_report(report: dict[str, object]) -> ArmIdentity:
+    try:
+        source = report["input"]
+        sequence = report["sequence"]
+        rendering = report["rendering"]
+        frames = report["frames"]
+        if not isinstance(source, dict) or not isinstance(sequence, dict) or not isinstance(rendering, dict) or not isinstance(frames, list):
+            raise TypeError
+        if "canvas" in rendering:
+            width, height = rendering["canvas"]
+        else:
+            width, height = source["width"], source["height"]
+        sequence_config = parse_gate_f_frame_sequence_config({
+            "format": "oneclick2d.gate-f-frame-sequence-config",
+            "format_version": "0.1.0",
+            "profile_id": sequence["profile_id"],
+            "seed_u64": sequence["seed_u64"],
+        })
+        expected_sequence = build_gate_f_frame_sequence(sequence_config)
+        frame_ids = tuple(str(frame["id"]) for frame in frames)
+        expected_ids = tuple(frame.id for frame in expected_sequence.frames)
+        if (
+            sequence["sha256"] != expected_sequence.sha256
+            or sequence["frame_count"] != len(expected_ids)
+            or frame_ids != expected_ids
+            or len(frame_ids) != len(set(frame_ids))
+            or any(frame.get("index") != index for index, frame in enumerate(frames))
+        ):
+            raise StageContractError("arm report sequence evidence is inconsistent")
+        return ArmIdentity(
+            str(source["normalized_raster_sha256"]),
+            str(sequence["sha256"]),
+            str(rendering["contract_id"]),
+            str(rendering["profile_id"]),
+            int(width),
+            int(height),
+            frame_ids,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StageContractError("arm report is invalid") from exc
 
 
 def validate_arm_parity(candidate: ArmIdentity, comparator: ArmIdentity) -> None:

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import base64
 import functools
+import hashlib
 import importlib
+import importlib.metadata
+import importlib.util
 import json
+import os
 import struct
 import subprocess
 import tempfile
@@ -16,10 +20,14 @@ from unittest import mock
 from spikes.gate_f_runner.__main__ import main
 from spikes.gate_f_runner.contracts import StageContractError
 from spikes.gate_f_runner.model_worker import (
+    DEVICE_POLICY_PATH,
     ENTRYPOINT_ROOT,
     MODEL_PART_NAMES,
     MODEL_SEMANTIC_NAMES,
+    NF4_MARIGOLD_DEVICE_POLICY_ID,
     PROFILE_ID,
+    PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+    _consume_entrypoint_attestation,
     _inventory,
     _invoke_wsl,
     _load_profile,
@@ -31,6 +39,13 @@ from spikes.gate_f_runner.model_worker import (
     _wsl_path,
     run_model_worker,
 )
+from spikes.gate_f_runner.model_entrypoints.nf4_marigold_device_policy import Nf4MarigoldOffloadAdapter
+from spikes.gate_f_runner.runtime import read_bounded_file
+
+
+PINNED_MODEL_ROOT = Path.home() / "oneclick2d-model-spikes" / "see-through"
+PINNED_MODEL_PYTHON = PINNED_MODEL_ROOT / ".venv" / "bin" / "python"
+V4_ENTRYPOINT = ENTRYPOINT_ROOT / "see_through_v3_nf4_source_preserve_v4.py"
 
 
 def _minimal_psd() -> bytes:
@@ -169,6 +184,192 @@ def _write_complete_model_output(output: Path) -> None:
     )
 
 
+def _valid_entrypoint_attestation() -> dict[str, object]:
+    return {
+        "format": "oneclick2d.model-entrypoint-attestation",
+        "format_version": "0.1.0",
+        "policy_id": NF4_MARIGOLD_DEVICE_POLICY_ID,
+        "requested_cpu_offload": True,
+        "execution_device": "cuda:0",
+        "components": {
+            "vae": {
+                "storage_devices": ["meta"],
+                "execution_hook_devices": ["cuda:0"],
+                "upstream_cuda_move_suppressed": True,
+                "disposition": "sequential-cpu-offload",
+            },
+            "unet": {
+                "storage_devices": ["cuda:0"],
+                "execution_hook_devices": [],
+                "upstream_cuda_move_suppressed": True,
+                "disposition": "resident-quantized",
+            },
+            "text_encoder": {
+                "storage_devices": [],
+                "execution_hook_devices": [],
+                "upstream_cuda_move_suppressed": True,
+                "disposition": "cached-and-released",
+            },
+        },
+        "psd_pixel_projection_algorithm_id": PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+        "psd_projection_verified": True,
+    }
+
+
+def _unpack_packbits(data: bytes, expected_length: int) -> bytes:
+    decoded = bytearray()
+    offset = 0
+    while offset < len(data) and len(decoded) < expected_length:
+        control = data[offset]
+        offset += 1
+        if control <= 127:
+            count = control + 1
+            decoded.extend(data[offset : offset + count])
+            offset += count
+        elif control >= 129:
+            count = 257 - control
+            decoded.extend(data[offset : offset + 1] * count)
+            offset += 1
+    if len(decoded) != expected_length:
+        raise AssertionError("PSD PackBits row length mismatch")
+    return bytes(decoded)
+
+
+def _decode_psd_layers(path: Path) -> dict[str, tuple[tuple[int, int, int, int], bytes]]:
+    exact = path.read_bytes()
+    if exact[:6] != b"8BPS\0\1":
+        raise AssertionError("not a version-1 PSD")
+    offset = 26
+    for _ in range(2):
+        length = struct.unpack_from(">I", exact, offset)[0]
+        offset += 4 + length
+    layer_and_mask_length = struct.unpack_from(">I", exact, offset)[0]
+    offset += 4
+    section_end = offset + layer_and_mask_length
+    layer_info_length = struct.unpack_from(">I", exact, offset)[0]
+    offset += 4
+    layer_info_end = offset + layer_info_length
+    layer_count = abs(struct.unpack_from(">h", exact, offset)[0])
+    offset += 2
+    records: list[dict[str, object]] = []
+    for _ in range(layer_count):
+        top, left, bottom, right, channel_count = struct.unpack_from(">iiiiH", exact, offset)
+        offset += 18
+        channels = []
+        for _ in range(channel_count):
+            channel_id, length = struct.unpack_from(">hI", exact, offset)
+            offset += 6
+            channels.append((channel_id, length))
+        if exact[offset : offset + 4] != b"8BIM":
+            raise AssertionError("PSD layer blend signature mismatch")
+        offset += 12
+        extra_length = struct.unpack_from(">I", exact, offset)[0]
+        offset += 4
+        extra_end = offset + extra_length
+        mask_length = struct.unpack_from(">I", exact, offset)[0]
+        offset += 4 + mask_length
+        ranges_length = struct.unpack_from(">I", exact, offset)[0]
+        offset += 4 + ranges_length
+        name_length = exact[offset]
+        offset += 1
+        name = exact[offset : offset + name_length].decode("ascii")
+        offset += name_length
+        offset += -(name_length + 1) % 4
+        offset = extra_end
+        records.append(
+            {
+                "name": name,
+                "bbox": (left, top, right, bottom),
+                "channels": channels,
+            }
+        )
+
+    decoded_layers: dict[str, tuple[tuple[int, int, int, int], bytes]] = {}
+    for record in records:
+        left, top, right, bottom = record["bbox"]
+        width = right - left
+        height = bottom - top
+        decoded_channels: dict[int, bytes] = {}
+        for channel_id, length in record["channels"]:
+            channel_end = offset + length
+            compression = struct.unpack_from(">H", exact, offset)[0]
+            offset += 2
+            if compression == 0:
+                channel = exact[offset:channel_end]
+            elif compression == 1:
+                row_lengths = struct.unpack_from(f">{height}H", exact, offset)
+                offset += height * 2
+                rows = []
+                for row_length in row_lengths:
+                    rows.append(_unpack_packbits(exact[offset : offset + row_length], width))
+                    offset += row_length
+                channel = b"".join(rows)
+            else:
+                raise AssertionError("unsupported PSD compression")
+            offset = channel_end
+            decoded_channels[channel_id] = channel
+        rgba = bytearray(width * height * 4)
+        for index in range(width * height):
+            rgba[index * 4 : index * 4 + 4] = bytes(
+                (
+                    decoded_channels[0][index],
+                    decoded_channels[1][index],
+                    decoded_channels[2][index],
+                    decoded_channels[-1][index],
+                )
+            )
+        decoded_layers[record["name"]] = (record["bbox"], bytes(rgba))
+    if offset > layer_info_end or layer_info_end > section_end:
+        raise AssertionError("PSD layer section bounds mismatch")
+    return decoded_layers
+
+
+def _decoded_psd_pixel(
+    layer: tuple[tuple[int, int, int, int], bytes],
+    x: int,
+    y: int,
+) -> tuple[int, int, int, int]:
+    (left, top, right, bottom), pixels = layer
+    if not left <= x < right or not top <= y < bottom:
+        raise AssertionError("pixel is outside PSD layer")
+    offset = ((y - top) * (right - left) + (x - left)) * 4
+    return tuple(pixels[offset : offset + 4])  # type: ignore[return-value]
+
+
+def _write_source_projection_fixture(directory: Path) -> None:
+    from PIL import Image
+
+    size = (24, 24)
+    source = Image.new("RGBA", size, (10, 20, 30, 255))
+    for x in range(12, 16):
+        for y in range(size[1]):
+            source.putpixel((x, y), (10, 20, 30, 0))
+    for x in range(16, 20):
+        for y in range(size[1]):
+            source.putpixel((x, y), (10, 20, 30, 31))
+    for x in range(20, 24):
+        for y in range(size[1]):
+            source.putpixel((x, y), (10, 20, 30, 32))
+    source.save(directory / "src_img.png", format="PNG")
+
+    colors = {"face": (100, 1, 1), "nose": (1, 100, 1), "mouth": (1, 1, 100)}
+    starts = {"face": 0, "nose": 4, "mouth": 8}
+    depths = {"face": 120, "nose": 80, "mouth": 40}
+    for name in MODEL_PART_NAMES:
+        rgba = Image.new("RGBA", size, (*colors.get(name, (0, 0, 0)), 0))
+        depth = Image.new("L", size, depths.get(name, 255))
+        if name in starts:
+            for x in range(starts[name], size[0]):
+                for y in range(size[1]):
+                    rgba.putpixel((x, y), (*colors[name], 255))
+        rgba.save(directory / f"{name}.png", format="PNG")
+        depth.save(directory / f"{name}_depth.png", format="PNG")
+    (directory / "info.json").write_text(
+        json.dumps({"parts": {name: {} for name in MODEL_PART_NAMES}}, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
 class GateFModelWorkerTests(unittest.TestCase):
     def test_profiles_have_pinned_safe_weight_artifacts(self) -> None:
         profile, exact = _load_profile()
@@ -197,17 +398,11 @@ class GateFModelWorkerTests(unittest.TestCase):
             / "model_profiles"
             / profile["runtime"]["dependencies_profile"]
         )
-        import hashlib
-
         self.assertEqual(
             profile["runtime"]["dependencies_sha256"],
             hashlib.sha256(dependencies_path.read_bytes()).hexdigest(),
         )
         entrypoint_path = ENTRYPOINT_ROOT / profile["entrypoint"]["path"]
-        self.assertEqual(
-            profile["entrypoint"]["sha256"],
-            hashlib.sha256(entrypoint_path.read_bytes()).hexdigest(),
-        )
         self.assertEqual(entrypoint_path, _validated_entrypoint(profile))
         self.assertEqual("source-visible-rgb-by-depth-mask-clean.v2", _validated_postprocess(profile)["algorithm_id"])
         invalid_profile = {**profile, "postprocess": {**profile["postprocess"], "visible_alpha_threshold": 0}}
@@ -219,6 +414,33 @@ class GateFModelWorkerTests(unittest.TestCase):
         self.assertEqual("MIT", landmark["code"]["license"])
         self.assertEqual(2, len(landmark["models"]))
         self.assertTrue(all(model["path"] == "model.safetensors" for model in landmark["models"]))
+
+    def test_profile_entrypoint_digest_matches_executed_file(self) -> None:
+        profile, _ = _load_profile()
+        entrypoint = profile["entrypoint"]
+        entrypoint_path = ENTRYPOINT_ROOT / entrypoint["path"]
+        self.assertEqual(entrypoint["sha256"], hashlib.sha256(entrypoint_path.read_bytes()).hexdigest())
+
+    def test_profile_attests_device_policy_digest(self) -> None:
+        profile, _ = _load_profile()
+        device_policy = profile["entrypoint"]["device_policy"]
+        self.assertEqual(DEVICE_POLICY_PATH.name, device_policy["path"])
+        self.assertEqual(device_policy["sha256"], hashlib.sha256(DEVICE_POLICY_PATH.read_bytes()).hexdigest())
+        self.assertEqual(ENTRYPOINT_ROOT / profile["entrypoint"]["path"], _validated_entrypoint(profile))
+
+    def test_entrypoint_validation_rejects_mismatched_executed_file_digest(self) -> None:
+        profile, _ = _load_profile()
+        entrypoint_path = ENTRYPOINT_ROOT / profile["entrypoint"]["path"]
+        real_read = read_bounded_file
+
+        def changed_entrypoint(path: Path, limit: int = 64 * 1024 * 1024) -> bytes:
+            if path == entrypoint_path:
+                return real_read(path, limit) + b"\n# changed after profile publication\n"
+            return real_read(path, limit)
+
+        with mock.patch("spikes.gate_f_runner.model_worker.read_bounded_file", side_effect=changed_entrypoint):
+            with self.assertRaisesRegex(StageContractError, "entrypoint digest mismatch"):
+                _validated_entrypoint(profile)
 
     def test_inventory_describes_bounded_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -299,6 +521,115 @@ class GateFModelWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(StageContractError, "dependency profile mismatch"):
             _verify_runtime(profile, "0" * 64)
 
+    def test_entrypoint_attestation_records_effective_offload_devices(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "attestation.json"
+            path.write_text(json.dumps(_valid_entrypoint_attestation()), encoding="utf-8")
+            _consume_entrypoint_attestation(path)
+            self.assertFalse(path.exists())
+
+    def test_entrypoint_attestation_rejects_all_cuda_components(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "attestation.json"
+            attestation = _valid_entrypoint_attestation()
+            attestation["components"]["vae"]["storage_devices"] = ["cuda:0"]
+            attestation["components"]["vae"]["execution_hook_devices"] = []
+            path.write_text(json.dumps(attestation), encoding="utf-8")
+            with self.assertRaisesRegex(StageContractError, "device attestation"):
+                _consume_entrypoint_attestation(path)
+            self.assertFalse(path.exists())
+
+    def test_nf4_marigold_policy_never_places_all_components_on_cuda(self) -> None:
+        timeline: list[tuple[str, str, str]] = []
+
+        class Tensor:
+            def __init__(self, device: str) -> None:
+                self.device = device
+
+        class Component:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.tensor = Tensor("cpu")
+
+            @property
+            def device(self) -> str:
+                return self.tensor.device
+
+            def parameters(self, recurse: bool = True):
+                del recurse
+                return iter((self.tensor,))
+
+            def buffers(self, recurse: bool = True):
+                del recurse
+                return iter(())
+
+            def modules(self):
+                return iter((self,))
+
+            def to(self, *args, **kwargs):
+                device = kwargs.get("device", args[0] if args else None)
+                if device is not None:
+                    self.tensor.device = str(device)
+                    timeline.append(pipeline.snapshot())
+                return self
+
+        class ReleasedTextEncoder:
+            def parameters(self, recurse: bool = True):
+                del recurse
+                return iter(())
+
+            def buffers(self, recurse: bool = True):
+                del recurse
+                return iter(())
+
+            def modules(self):
+                return iter((self,))
+
+        class MockMarigoldPipeline:
+            def __init__(self) -> None:
+                self.vae = Component("vae")
+                self.unet = Component("unet")
+                self.text_encoder = Component("text_encoder")
+
+            def live_components(self):
+                return (self.vae, self.unet, self.text_encoder)
+
+            def snapshot(self):
+                return tuple(
+                    item.tensor.device if hasattr(item, "tensor") else "released"
+                    for item in self.live_components()
+                )
+
+            def cache_tag_embeds(self):
+                self.text_encoder.to(device="cpu")
+                self.text_encoder = ReleasedTextEncoder()
+
+        pipeline = MockMarigoldPipeline()
+
+        def mocked_cpu_offload(component, *, execution_device, offload_buffers):
+            del offload_buffers
+            component.tensor.device = "meta"
+            component._hf_hook = mock.Mock(execution_device=execution_device)
+            timeline.append((pipeline.vae.tensor.device, pipeline.unet.tensor.device, "released"))
+
+        adapter = Nf4MarigoldOffloadAdapter(
+            pipeline,
+            cpu_offload=mocked_cpu_offload,
+            execution_device="cuda:0",
+        )
+        adapter.vae.to(device="cuda")
+        adapter.unet.to(device="cuda")
+        adapter.text_encoder.to(device="cuda")
+        adapter.cache_tag_embeds()
+
+        self.assertTrue(timeline)
+        self.assertTrue(all(sum(device.startswith("cuda") for device in state) < 3 for state in timeline))
+        attestation = adapter.attestation(psd_projection_verified=True)
+        self.assertEqual(["meta"], attestation["components"]["vae"]["storage_devices"])
+        self.assertEqual(["cuda:0"], attestation["components"]["vae"]["execution_hook_devices"])
+        self.assertEqual(["cuda:0"], attestation["components"]["unet"]["storage_devices"])
+        self.assertEqual([], attestation["components"]["text_encoder"]["storage_devices"])
+
     def test_wsl_model_verification_rejects_tracked_checkout_changes(self) -> None:
         profile, _ = _load_profile()
         completed = [
@@ -342,13 +673,16 @@ class GateFModelWorkerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "spikes.gate_f_runner.model_worker._verify_wsl_models"
-        ), mock.patch("spikes.gate_f_runner.model_worker._run_checked", side_effect=completed):
+        ), mock.patch("spikes.gate_f_runner.model_worker._consume_entrypoint_attestation"), mock.patch(
+            "spikes.gate_f_runner.model_worker._run_checked", side_effect=completed
+        ):
             root = Path(directory)
             (root / "output").mkdir()
             _invoke_wsl(root / "source.png", root / "output", profile, 30)
         command = calls[-1]
         self.assertIn("HF_HUB_OFFLINE=1", command)
         self.assertIn("TRANSFORMERS_OFFLINE=1", command)
+        self.assertIn("ONECLICK2D_ENTRYPOINT_ATTESTATION=/mnt/d/model-spike/.entrypoint-attestation.json", command)
         self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", command)
         self.assertIn("--cpu_offload", command)
         self.assertIn("--no_group_offload", command)
@@ -380,6 +714,14 @@ class GateFModelWorkerTests(unittest.TestCase):
             self.assertEqual("model spike failed: isolated model worker error\n", stderr.getvalue())
             self.assertNotIn(str(source), stderr.getvalue())
             self.assertFalse((workspace / "run.timeout").exists())
+
+@unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
+class GateFModelWorkerPillowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if importlib.metadata.version("Pillow") != "12.1.0":
+            raise unittest.SkipTest("complete model artifact fixtures require locked Pillow 12.1.0")
 
     def test_worker_reports_model_only_after_successful_pinned_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -509,6 +851,71 @@ class GateFModelWorkerTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(StageContractError, "model worker process failed"):
                     run_model_worker(source, output, timeout_seconds=30)
+
+
+@unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
+class GateFV4EntrypointPillowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if importlib.metadata.version("Pillow") != "12.1.0":
+            raise unittest.SkipTest("v4 pixel fixtures require locked Pillow 12.1.0")
+        if not PINNED_MODEL_PYTHON.is_file():
+            raise unittest.SkipTest("pinned See-through worker environment is unavailable")
+        cls._temporary = tempfile.TemporaryDirectory()
+        cls.semantic_root = Path(cls._temporary.name) / "input"
+        cls.semantic_root.mkdir()
+        _write_source_projection_fixture(cls.semantic_root)
+        environment = os.environ.copy()
+        environment["MPLCONFIGDIR"] = str(Path(cls._temporary.name) / "matplotlib")
+        completed = subprocess.run(
+            [
+                str(PINNED_MODEL_PYTHON),
+                str(V4_ENTRYPOINT),
+                "--source-preserve-and-assemble-only",
+                str(cls.semantic_root),
+            ],
+            cwd=PINNED_MODEL_ROOT,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr.decode("utf-8", errors="replace"))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._temporary.cleanup()
+        super().tearDownClass()
+
+    def test_source_refill_requires_source_alpha_above_noise_floor(self) -> None:
+        from PIL import Image
+
+        with Image.open(self.semantic_root / "mouth.png", formats=("PNG",)) as image:
+            mouth = image.convert("RGBA")
+            self.assertEqual((10, 20, 30, 255), mouth.getpixel((8, 4)))
+            self.assertEqual((1, 1, 100, 255), mouth.getpixel((12, 4)))
+            self.assertEqual((1, 1, 100, 255), mouth.getpixel((16, 4)))
+            self.assertEqual((10, 20, 30, 255), mouth.getpixel((20, 4)))
+        with Image.open(self.semantic_root / "nose.png", formats=("PNG",)) as image:
+            nose = image.convert("RGBA")
+            self.assertEqual((10, 20, 30, 255), nose.getpixel((4, 4)))
+            self.assertEqual((1, 100, 1, 255), nose.getpixel((8, 4)))
+
+    def test_psd_readback_preserves_only_depth_selected_source_visible_rgb(self) -> None:
+        layers = _decode_psd_layers(self.semantic_root.parent / "input.psd")
+        self.assertTrue({"face", "nose", "mouth"}.issubset(layers))
+        self.assertEqual((10, 20, 30, 255), _decoded_psd_pixel(layers["face"], 0, 4))
+        self.assertEqual((100, 1, 1, 255), _decoded_psd_pixel(layers["face"], 4, 4))
+        self.assertEqual((10, 20, 30, 255), _decoded_psd_pixel(layers["nose"], 4, 4))
+        self.assertEqual((1, 100, 1, 255), _decoded_psd_pixel(layers["nose"], 8, 4))
+        self.assertEqual((10, 20, 30, 255), _decoded_psd_pixel(layers["mouth"], 8, 4))
+        self.assertEqual((1, 1, 100, 255), _decoded_psd_pixel(layers["mouth"], 12, 4))
+        self.assertEqual((1, 1, 100, 255), _decoded_psd_pixel(layers["mouth"], 16, 4))
+        self.assertEqual((10, 20, 30, 255), _decoded_psd_pixel(layers["mouth"], 20, 4))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from .runtime import canonical_json_bytes, read_bounded_file, sha256_bytes, stri
 
 PROFILE_ROOT = Path(__file__).with_name("model_profiles")
 ENTRYPOINT_ROOT = Path(__file__).with_name("model_entrypoints")
+DEVICE_POLICY_PATH = ENTRYPOINT_ROOT / "nf4_marigold_device_policy.py"
 PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v4"
 PROFILE_PATH = PROFILE_ROOT / "see-through-v3-nf4.json"
 LEGACY_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.v2"
@@ -30,6 +31,8 @@ LEGACY_SOURCE_PRESERVE_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserv
 LEGACY_SOURCE_PRESERVE_PROFILE_SHA256 = "990b2561bb2067e3838aedf1751d9a86a06e6dfc985aad92189ec9fda387ec83"
 LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256 = "6b625faa99022f6edfa5faba97b23054331b9276501e2b02953cb783f357ec71"
 SOURCE_PRESERVE_ALGORITHM_ID = "source-visible-rgb-by-depth-mask-clean.v2"
+NF4_MARIGOLD_DEVICE_POLICY_ID = "see-through.v4.nf4-marigold-bounded-offload.v1"
+PSD_PIXEL_PROJECTION_ALGORITHM_ID = f"{SOURCE_PRESERVE_ALGORITHM_ID}.psd-postcorrect.v1"
 MAX_MODEL_STDIO_BYTES = 2 * 1024 * 1024
 MAX_MODEL_RESULT_BYTES = 512 * 1024 * 1024
 MAX_MODEL_PNG_BYTES = 64 * 1024 * 1024
@@ -138,7 +141,12 @@ def _runtime(profile: dict[str, object]) -> tuple[str, str, str]:
 
 def _validated_entrypoint(profile: dict[str, object]) -> Path:
     entrypoint = profile.get("entrypoint")
-    if not isinstance(entrypoint, dict) or set(entrypoint) != {"path", "sha256", "upstream_script"}:
+    if not isinstance(entrypoint, dict) or set(entrypoint) != {
+        "path",
+        "sha256",
+        "upstream_script",
+        "device_policy",
+    }:
         raise StageContractError("model entrypoint profile is invalid")
     relative = entrypoint.get("path")
     expected_digest = entrypoint.get("sha256")
@@ -156,6 +164,22 @@ def _validated_entrypoint(profile: dict[str, object]) -> Path:
     exact = read_bounded_file(path, 256 * 1024)
     if sha256_bytes(exact) != expected_digest:
         raise StageContractError("model entrypoint digest mismatch")
+
+    device_policy = entrypoint.get("device_policy")
+    if not isinstance(device_policy, dict) or set(device_policy) != {"path", "sha256"}:
+        raise StageContractError("model entrypoint device policy profile is invalid")
+    policy_relative = device_policy.get("path")
+    policy_digest = device_policy.get("sha256")
+    if (
+        policy_relative != DEVICE_POLICY_PATH.name
+        or not isinstance(policy_digest, str)
+        or len(policy_digest) != 64
+        or any(character not in "0123456789abcdef" for character in policy_digest)
+    ):
+        raise StageContractError("model entrypoint device policy identity is invalid")
+    policy_exact = read_bounded_file(ENTRYPOINT_ROOT / policy_relative, 256 * 1024)
+    if sha256_bytes(policy_exact) != policy_digest:
+        raise StageContractError("model entrypoint device policy digest mismatch")
     return path
 
 
@@ -446,6 +470,7 @@ def _invoke_wsl(source: Path, output: Path, profile: dict[str, object], timeout_
     inference_output = output / "input"
     inference_output.mkdir()
     output_wsl = _wsl_path(inference_output, distribution)
+    attestation_path = inference_output / ".entrypoint-attestation.json"
     command = [
         "wsl.exe", "-d", distribution, "--cd", f"~/{root}", "--",
         f"./{python}", entrypoint_wsl,
@@ -476,14 +501,96 @@ def _invoke_wsl(source: Path, output: Path, profile: dict[str, object], timeout_
         "TRANSFORMERS_OFFLINE=1",
         "TRANSFORMERS_NO_ADVISORY_WARNINGS=1",
         "DO_NOT_TRACK=1",
+        f"ONECLICK2D_ENTRYPOINT_ATTESTATION={output_wsl}/.entrypoint-attestation.json",
         f"PYTORCH_CUDA_ALLOC_CONF={inference.get('cuda_allocator')}",
     ]
-    return _run_checked(
+    completed = _run_checked(
         command,
         timeout=timeout_seconds,
         output_limit=MAX_MODEL_STDIO_BYTES,
         env=os.environ.copy(),
     )
+    if completed.returncode == 0:
+        _consume_entrypoint_attestation(attestation_path)
+    return completed
+
+
+def _consume_entrypoint_attestation(path: Path) -> None:
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise StageContractError("model entrypoint attestation is missing")
+        try:
+            value = strict_load_json_bytes(read_bounded_file(path, 16 * 1024))
+        except (OSError, UnicodeDecodeError, ValueError, TypeError) as exc:
+            raise StageContractError("model entrypoint attestation is invalid") from exc
+        if (
+            not isinstance(value, dict)
+            or set(value)
+            != {
+                "format",
+                "format_version",
+                "policy_id",
+                "requested_cpu_offload",
+                "execution_device",
+                "components",
+                "psd_pixel_projection_algorithm_id",
+                "psd_projection_verified",
+            }
+            or value.get("format") != "oneclick2d.model-entrypoint-attestation"
+            or value.get("format_version") != "0.1.0"
+            or value.get("policy_id") != NF4_MARIGOLD_DEVICE_POLICY_ID
+            or value.get("requested_cpu_offload") is not True
+            or value.get("execution_device") != "cuda:0"
+            or value.get("psd_pixel_projection_algorithm_id") != PSD_PIXEL_PROJECTION_ALGORITHM_ID
+            or value.get("psd_projection_verified") is not True
+        ):
+            raise StageContractError("model entrypoint attestation is invalid")
+        components = value.get("components")
+        if not isinstance(components, dict) or set(components) != {"vae", "unet", "text_encoder"}:
+            raise StageContractError("model entrypoint device attestation is invalid")
+        expected_dispositions = {
+            "vae": "sequential-cpu-offload",
+            "unet": "resident-quantized",
+            "text_encoder": "cached-and-released",
+        }
+        for name, disposition in expected_dispositions.items():
+            component = components.get(name)
+            if not isinstance(component, dict) or set(component) != {
+                "storage_devices",
+                "execution_hook_devices",
+                "upstream_cuda_move_suppressed",
+                "disposition",
+            }:
+                raise StageContractError("model entrypoint device attestation is invalid")
+            storage = component.get("storage_devices")
+            hooks = component.get("execution_hook_devices")
+            if (
+                not isinstance(storage, list)
+                or not isinstance(hooks, list)
+                or any(not isinstance(device, str) or not device for device in (*storage, *hooks))
+                or storage != sorted(set(storage))
+                or hooks != sorted(set(hooks))
+                or not isinstance(component.get("upstream_cuda_move_suppressed"), bool)
+                or component.get("disposition") != disposition
+            ):
+                raise StageContractError("model entrypoint device attestation is invalid")
+        vae = components["vae"]
+        unet = components["unet"]
+        text_encoder = components["text_encoder"]
+        is_cuda = lambda device: device == "cuda" or device.startswith("cuda:")
+        if (
+            vae["upstream_cuda_move_suppressed"] is not True
+            or any(is_cuda(device) for device in vae["storage_devices"])
+            or not vae["execution_hook_devices"]
+            or not all(is_cuda(device) for device in vae["execution_hook_devices"])
+            or unet["upstream_cuda_move_suppressed"] is not True
+            or not unet["storage_devices"]
+            or not all(is_cuda(device) for device in unet["storage_devices"])
+            or any(is_cuda(device) for device in text_encoder["storage_devices"])
+        ):
+            raise StageContractError("model entrypoint device attestation is invalid")
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _validated_inference(profile: dict[str, object]) -> dict[str, object]:

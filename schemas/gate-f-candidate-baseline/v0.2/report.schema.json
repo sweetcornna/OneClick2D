@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-candidate-baseline/v0.2/report.schema.json",
+  "title": "OneClick2D Gate F Deterministic Candidate Baseline Report v0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "scope", "adapter_id", "adapter_version", "contract_id", "input", "suitability", "ontology", "layers", "geometry", "parameters", "sequence", "rendering", "frames", "validation", "claims"],
+  "properties": {
+    "format": {"const": "oneclick2d.candidate-baseline-report"},
+    "format_version": {"const": "0.2.0"},
+    "scope": {"const": "disposable-gate-f-spike"},
+    "adapter_id": {"const": "candidate.baseline.pillow.v1"},
+    "adapter_version": {"const": "0.2.0"},
+    "contract_id": {"const": "oc2d.spike.candidate-baseline.v1"},
+    "input": {"type": "object"},
+    "suitability": {"type": "object"},
+    "ontology": {"type": "array", "minItems": 6, "maxItems": 6},
+    "layers": {"type": "array", "minItems": 5, "maxItems": 5},
+    "geometry": {"type": "array", "minItems": 4, "maxItems": 4},
+    "parameters": {"type": "array", "minItems": 5, "maxItems": 5},
+    "sequence": {"type": "object"},
+    "rendering": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_id", "profile_id", "canvas", "color_space", "input_alpha_mode", "filter_space"],
+      "properties": {
+        "contract_id": {"const": "oc2d.spike.pillow-rgba-renderer.v1"},
+        "profile_id": {"const": "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2"},
+        "canvas": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 1}, {"type": "integer", "minimum": 1}], "minItems": 2, "maxItems": 2},
+        "color_space": {"const": "srgb"},
+        "input_alpha_mode": {"const": "straight"},
+        "filter_space": {"const": "premultiplied-srgb-u8"}
+      }
+    },
+    "frames": {"type": "array", "minItems": 37, "maxItems": 37},
+    "validation": {"type": "object"},
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_used", "semantic_correctness_on_real_art_proven", "psd_produced", "gate_f_feasibility_proven"],
+      "properties": {
+        "model_used": {"const": false},
+        "semantic_correctness_on_real_art_proven": {"const": false},
+        "psd_produced": {"const": false},
+        "gate_f_feasibility_proven": {"const": false}
+      }
+    }
+  }
+}

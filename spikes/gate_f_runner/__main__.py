@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
 
 from .contracts import SpecValidationError, StageContractError, StageStatus
 from .runner import PipelineRunner
-from .runtime import ID_RE, canonical_json_bytes
+from .runtime import (
+    ID_RE,
+    create_regular_run_file,
+    read_bounded_file,
+    require_regular_workspace_root,
+)
 from .synthetic import build_synthetic_registry
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +29,28 @@ EXIT_CODES = {
     StageStatus.FAILED: 70,
     StageStatus.CANCELLED: 130,
 }
+WINDOWS_SOURCE_PATH_REQUIRES_WINDOWS_HOST_SHELL = "WINDOWS_SOURCE_PATH_REQUIRES_WINDOWS_HOST_SHELL"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+JPEG_SIGNATURE = b"\xff\xd8"
+
+
+def _is_windows_drive_absolute_path(path: Path) -> bool:
+    value = str(path)
+    return (
+        len(value) >= 3
+        and value[0].isascii()
+        and value[0].isalpha()
+        and value[1] == ":"
+        and value[2] in ("/", "\\")
+    )
+
+
+def _model_source_media_type(source: bytes) -> str:
+    if source.startswith(PNG_SIGNATURE):
+        return "image/png"
+    if source.startswith(JPEG_SIGNATURE):
+        return "image/jpeg"
+    raise ValueError("unsupported model source container")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -84,22 +112,41 @@ def _gui(args: argparse.Namespace) -> int:
 
 
 def _model(args: argparse.Namespace) -> int:
-    from .model_worker import run_model_worker
-
     if not ID_RE.fullmatch(args.run_id) or not 1 <= args.timeout_seconds <= 3600:
         print("model spike rejected: invalid run or timeout", file=sys.stderr)
         return 64
-    output = args.workspace_root / args.run_id / "model-output"
-    result_path = args.workspace_root / args.run_id / "model-result.json"
-    if output.parent.exists():
+    if os.name == "posix" and _is_windows_drive_absolute_path(args.source):
+        print(WINDOWS_SOURCE_PATH_REQUIRES_WINDOWS_HOST_SHELL, file=sys.stderr)
+        return 64
+
+    from .model_workbench import MAX_SOURCE_BYTES, run_normalized_model_workbench
+    from .model_worker import run_model_worker
+
+    try:
+        workspace_root = require_regular_workspace_root(args.workspace_root, create=True)
+        run_dir = workspace_root / args.run_id
+        if run_dir.exists() or run_dir.is_symlink():
+            print("model spike rejected: invalid or existing run", file=sys.stderr)
+            return 64
+        source_bytes = read_bounded_file(args.source, MAX_SOURCE_BYTES)
+        media_type = _model_source_media_type(source_bytes)
+    except FileExistsError:
         print("model spike rejected: invalid or existing run", file=sys.stderr)
         return 64
+    except (OSError, ValueError):
+        print("model spike failed: isolated model worker error", file=sys.stderr)
+        return 70
     try:
-        output.parent.mkdir(parents=True)
-        result = run_model_worker(args.source, output, timeout_seconds=args.timeout_seconds)
-        result_path.write_bytes(canonical_json_bytes(result))
-    except (OSError, ValueError, TypeError, StageContractError):
-        shutil.rmtree(output.parent, ignore_errors=True)
+        _, _, result = run_normalized_model_workbench(
+            workspace_root,
+            args.run_id,
+            source_bytes,
+            media_type,
+            run_model_worker,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except (OSError, ValueError, TypeError, SpecValidationError, StageContractError):
+        shutil.rmtree(run_dir, ignore_errors=True)
         print("model spike failed: isolated model worker error", file=sys.stderr)
         return 70
     print(
@@ -127,20 +174,51 @@ def _motion(args: argparse.Namespace) -> int:
     return 0
 
 
+def _model_candidate(args: argparse.Namespace) -> int:
+    from .model_candidate import generate_model_candidate_preflight
+
+    if not ID_RE.fullmatch(args.run_id):
+        print("model candidate rejected: invalid run id", file=sys.stderr)
+        return 64
+    try:
+        _, report = generate_model_candidate_preflight(args.workspace_root / args.run_id)
+    except (OSError, ValueError, TypeError, LookupError, StageContractError):
+        print("model candidate failed: validated local preflight error", file=sys.stderr)
+        return 70
+    print(
+        f"run_id={args.run_id} status={report['local_status']} "
+        f"gate_f={report['gate_f_status']}"
+    )
+    return 0
+
+
+def _verify_model_candidate(args: argparse.Namespace) -> int:
+    from .model_candidate import load_model_candidate_preflight_report
+
+    if not ID_RE.fullmatch(args.run_id):
+        print("model candidate verification rejected: invalid run id", file=sys.stderr)
+        return 64
+    try:
+        report = load_model_candidate_preflight_report(args.workspace_root / args.run_id)
+    except (OSError, ValueError, TypeError, LookupError, StageContractError):
+        print("model candidate verification failed", file=sys.stderr)
+        return 70
+    print(
+        f"run_id={args.run_id} status={report['local_status']} "
+        f"gate_f={report['gate_f_status']}"
+    )
+    return 0
+
+
 def _cancel(args: argparse.Namespace) -> int:
     if not ID_RE.fullmatch(args.run_id):
         print("cancel rejected: invalid run id", file=sys.stderr)
         return 64
     try:
-        run_dir = args.workspace_root / args.run_id
-        if not run_dir.is_dir() or run_dir.is_symlink():
-            print("cancel rejected: unknown run", file=sys.stderr)
-            return 64
-        sentinel = run_dir / "cancel.request"
-        try:
-            sentinel.touch(exist_ok=False)
-        except FileExistsError:
-            pass
+        create_regular_run_file(args.workspace_root, args.run_id, "cancel.request")
+    except ValueError:
+        print("cancel rejected: unknown or unsafe run", file=sys.stderr)
+        return 64
     except OSError:
         print("cancel failed: local runner error", file=sys.stderr)
         return 70
@@ -211,6 +289,22 @@ def build_parser() -> argparse.ArgumentParser:
     motion.add_argument("--run-id", required=True)
     motion.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
     motion.set_defaults(func=_motion)
+
+    model_candidate = subparsers.add_parser(
+        "model-candidate",
+        help="generate a single-item preflight for a validated model and motion run",
+    )
+    model_candidate.add_argument("--run-id", required=True)
+    model_candidate.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
+    model_candidate.set_defaults(func=_model_candidate)
+
+    verify_model_candidate = subparsers.add_parser(
+        "verify-model-candidate",
+        help="verify a published single-item model candidate preflight",
+    )
+    verify_model_candidate.add_argument("--run-id", required=True)
+    verify_model_candidate.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
+    verify_model_candidate.set_defaults(func=_verify_model_candidate)
 
     cancel = subparsers.add_parser("cancel", help="request cooperative cancellation")
     cancel.add_argument("--run-id", required=True)

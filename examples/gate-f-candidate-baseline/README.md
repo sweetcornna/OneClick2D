@@ -10,4 +10,6 @@
 - **Trademark/likeness:** none.
 - **Takedown:** repository maintainers may remove or replace it through normal review.
 
+The current v0.2 config records the shared premultiplied-alpha renderer profile used by both arms; fixed regions, suitability, geometry, parameters, and sequence remain unchanged.
+
 This deterministic rule baseline exercises automatic suitability, required-slot proposal, fixed layer extraction, quad geometry, mandatory parameter bindings, full shared trajectory validation, and rendering through the same Pillow renderer used by the comparator. It does not claim semantic correctness on real artwork and is not a learned candidate or Gate F result.

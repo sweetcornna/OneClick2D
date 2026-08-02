@@ -34,6 +34,8 @@ OneClick2D 是暂定的内部项目代号。项目探索把一张经过授权、
 
 ## 当前检查与预研烟雾测试
 
+以下固定命令中的模型支持命令必须从 Windows PowerShell 或 cmd 运行，并使用锁定的 Windows CPython/Pillow 12.1.0 环境；`model --source` 必须传 Windows 主机路径（例如 `C:/...`）。不支持直接从 WSL shell 调用这些模型命令。
+
 ```bash
 python scripts/validate_docs.py
 python -m unittest discover -s tests -p "test_*.py"
@@ -42,9 +44,11 @@ python -m spikes.gate_f_runner preflight --run-id run.local-technical
 python -m spikes.gate_f_runner gui
 python -m spikes.gate_f_runner model --source "C:/path/to/right-cleared.png" --run-id run.local-model
 python -m spikes.gate_f_runner motion --run-id run.local-model
+python -m spikes.gate_f_runner model-candidate --run-id run.local-model
+python -m spikes.gate_f_runner verify-model-candidate --run-id run.local-model
 ```
 
-前两项是立项文档 lint 和单元测试；Pillow 相关测试仅在依赖存在时运行。第三项仅验证可丢弃的标准库本地 Gate F 编排骨架能以不可变输入、确定性 seed 和 attempt 输出生成 typed manifest。第四项运行 purpose-created candidate/comparator、共享 37 帧序列与 renderer、paired statistics fixture、PSD structural readback，并生成 checksummed bundle；成功只称 `LOCAL_TECHNICAL_PREFLIGHT_PASS`，始终是 `GATE_F_NOT_EVALUATED`。第五项在 `127.0.0.1:8765` 启动本地图片工作台，可显式选择固定区域 deterministic baseline，或先经锁定 Pillow 规范化再调用隔离 WSL2 worker 的 See-through V3 NF4 模型路径；模型页展示固定模型身份、输入/重建、受清单约束的语义 RGBA/深度中间图和受检 PSD。模型执行及全部产物校验成功前始终记录 `model_used: false`，成功后才记录 `true`。第六项是同一固定模型 profile 的显式 CLI 预研入口；第七项只对已通过 `source-preserve.v4` 中性保真校验的运行生成 37 帧语义 bbox quad/affine 动态研究初稿，GUI 可逐帧或播放查看。所选 supporting weight 许可元数据仍不完整，因此不分发权重、不用于生产或 Gate F 计分。结果写入被 Git 忽略的 `workspaces/gate-f-spike/`，不自动删除；GUI 路径只能称 `LOCAL_WORKBENCH_COMPLETED`，模型命令只能称 `LOCAL_MODEL_SPIKE_COMPLETED`，motion 命令只能称 `LOCAL_MODEL_MOTION_DRAFT_COMPLETED`；三者均不生成 `.oc2d`、不提供外网端点，且都是 `GATE_F_NOT_EVALUATED`。
+前两项是立项文档 lint 和单元测试；Pillow 相关测试仅在依赖存在时运行。第三项仅验证可丢弃的标准库本地 Gate F 编排骨架能以不可变输入、确定性 seed 和 attempt 输出生成 typed manifest。第四项运行 purpose-created candidate/comparator、共享 37 帧序列与 renderer、paired statistics fixture、PSD structural readback，并生成 checksummed bundle；成功只称 `LOCAL_TECHNICAL_PREFLIGHT_PASS`，始终是 `GATE_F_NOT_EVALUATED`。第五项在 `127.0.0.1:8765` 启动本地图片工作台，可显式选择固定区域 deterministic baseline，或先经锁定 Pillow 规范化再调用隔离 WSL2 worker 的 See-through V3 NF4 模型路径；模型页展示固定模型身份、输入/重建、受清单约束的语义 RGBA/深度中间图和受检 PSD。模型执行及全部产物校验成功前始终记录 `model_used: false`，成功后才记录 `true`。第六项是同一固定模型 profile 的显式 CLI 预研入口；第七项只对已通过 `source-preserve.v4` 中性保真校验的运行生成 37 帧语义 bbox quad/affine 动态研究初稿，GUI 可逐帧或播放查看。第八项把该受检模型与 motion 结果确定性映射到完整 ontology、解剖学左右、source-visible/生成区 provenance，并在同一 canonical raster、renderer 和 37 帧身份下运行固定 comparator；第九项从磁盘重新计算并严格核对全部证据。两项成功都只能称 `LOCAL_MODEL_CANDIDATE_PREFLIGHT_COMPLETED` 与 `GATE_F_NOT_EVALUATED`，不会生成 ballot、paired outcome 或 `F-USABLE`。所选 supporting weight 许可元数据仍不完整，因此不分发权重、不用于生产或 Gate F 计分。结果写入被 Git 忽略的 `workspaces/gate-f-spike/`，不自动删除；GUI 路径只能称 `LOCAL_WORKBENCH_COMPLETED`，模型命令只能称 `LOCAL_MODEL_SPIKE_COMPLETED`，motion 命令只能称 `LOCAL_MODEL_MOTION_DRAFT_COMPLETED`；这些本地路径均不生成 `.oc2d`、不提供外网端点，且都是 `GATE_F_NOT_EVALUATED`。
 
 这些命令不证明 JSON Schema/package conformance、安全隔离、模型质量、专业拆层/补全/绑定、PSD 互操作或 Gate F 可行性。
 

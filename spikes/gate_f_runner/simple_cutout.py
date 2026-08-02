@@ -42,7 +42,7 @@ PATCH_SPECS = (
     ("eye.screen-right", "eye.left.open", "left", (53, 25, 73, 40)),
     ("mouth", "mouth.open", "not-applicable", (40, 42, 60, 56)),
 )
-FROZEN_COMPARATOR_CONFIG_SHA256 = "9d4cc332659b00b677885d9b65b83f86b1444753296194eb0e6b2bdc83c4af76"
+FROZEN_COMPARATOR_CONFIG_SHA256 = "9ec194b3aae030795d0d27373f2cfc553bee5f59a859eef7ae474317063d7d6b"
 
 
 @dataclass(frozen=True)
@@ -61,16 +61,17 @@ class Patch:
 
 def _parse_frozen_config(data: bytes) -> GateFFrameSequenceConfig:
     value = strict_load_json_bytes(data)
-    if not isinstance(value, dict) or value.get("format_version") != "0.2.0":
+    if not isinstance(value, dict) or value.get("format_version") != "0.3.0":
         raise StageContractError("unsupported simple-cutout config version")
     if sha256_bytes(canonical_json_bytes(value)) != FROZEN_COMPARATOR_CONFIG_SHA256:
         raise StageContractError("simple-cutout config does not match frozen v1 profile")
-    keys = {"format", "format_version", "profile_id", "required_pillow_version", "frame_sequence"}
+    keys = {"format", "format_version", "profile_id", "required_pillow_version", "required_renderer_profile_id", "frame_sequence"}
     if (
         set(value) != keys
         or value["format"] != "oneclick2d.simple-cutout-comparator-config"
         or value["profile_id"] != "oc2d.spike.simple-cutout-comparator.v1"
         or value["required_pillow_version"] != "12.1.0"
+        or value["required_renderer_profile_id"] != RENDERER_PROFILE_ID
     ):
         raise StageContractError("simple-cutout config is invalid")
     return parse_gate_f_frame_sequence_config(value["frame_sequence"])
@@ -283,7 +284,7 @@ class SimpleCutoutComparatorAdapter:
     adapter_id = "simple-cutout.comparator.pillow.v1"
     contract_id = "oc2d.spike.simple-cutout-comparator.v1"
     stage_type = "oc2d.spike.simple-cutout-comparator"
-    implementation_version = "0.2.0"
+    implementation_version = "0.3.0"
     execution_profile = "python-pillow-12.1.0-in-process-v1"
     execution_provider = "pillow-12.1.0"
     producer_kind = ProducerKind.DETERMINISTIC
@@ -338,7 +339,7 @@ class SimpleCutoutComparatorAdapter:
             context.cancellation.checkpoint()
             report_document = {
                 "format": "oneclick2d.simple-cutout-comparator-report",
-                "format_version": "0.2.0",
+                "format_version": "0.3.0",
                 "scope": "disposable-gate-f-spike",
                 "adapter_id": self.adapter_id,
                 "adapter_version": self.implementation_version,
@@ -392,7 +393,7 @@ class SimpleCutoutComparatorAdapter:
                     "identity_patch_policy": "skip-inactive-local-controls",
                     "composition_order": [patch.id for patch in patches],
                     "resampling": "pillow-bilinear",
-                    "rgba_filter_space": "straight-srgb-u8",
+                    "rgba_filter_space": "premultiplied-srgb-u8",
                     "alpha_composite": "porter-duff-source-over",
                     "outside_rgba": [0, 0, 0, 0],
                     "base_erased": False,

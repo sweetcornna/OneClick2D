@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -10,7 +12,13 @@ from pathlib import Path
 
 from spikes.gate_f_runner.contracts import SpecValidationError, StageStatus
 from spikes.gate_f_runner.runner import PipelineRunner, load_run_spec
-from spikes.gate_f_runner.runtime import derive_stage_seed, sha256_file, strict_load_json_bytes
+from spikes.gate_f_runner.runtime import (
+    RunWorkspace,
+    contained_run_path,
+    derive_stage_seed,
+    sha256_file,
+    strict_load_json_bytes,
+)
 from spikes.gate_f_runner.synthetic import build_synthetic_registry
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +123,199 @@ class GateFRunnerTests(unittest.TestCase):
                         self.assertEqual(artifact["sha256"], sha256_file(run_dir / artifact["uri"]))
                 forbidden = {".oc2d", ".psd", ".moc3", ".onnx", ".pt", ".pth"}
                 self.assertFalse(any(path.suffix.lower() in forbidden for path in run_dir.rglob("*")))
+
+    def test_contained_run_path_rejects_lexical_traversal_and_nonregular_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run.contained"
+            run_dir.mkdir()
+            (run_dir / "artifact.bin").write_bytes(b"artifact")
+
+            self.assertEqual(
+                run_dir / "artifact.bin",
+                contained_run_path(root, run_dir.name, "artifact.bin", kind="file"),
+            )
+            for relative in ("../outside.bin", "nested/../../outside.bin", "/outside.bin", "C:/outside.bin", "nested\\outside.bin", "artifact.bin:stream"):
+                with self.subTest(relative=relative), self.assertRaises(ValueError):
+                    contained_run_path(root, run_dir.name, relative, kind="file")
+
+            nonregular = run_dir / "nonregular"
+            nonregular.mkdir()
+            with self.assertRaises(ValueError):
+                contained_run_path(root, run_dir.name, nonregular.name, kind="file")
+
+    def test_contained_run_path_rejects_symlinked_run_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "artifact.bin").write_bytes(b"artifact")
+            linked_run = root / "run.linked"
+            try:
+                linked_run.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+
+            with self.assertRaises(ValueError):
+                contained_run_path(root, linked_run.name, "artifact.bin", kind="file")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_contained_run_path_rejects_junctioned_run_directory(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "artifact.bin").write_bytes(b"artifact")
+            junction = root / "run.junction"
+            completed = subprocess.run(
+                f'mklink /J "{junction}" "{outside}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(junction, "is_junction", lambda: False)():
+                self.skipTest("directory junctions are unavailable")
+            try:
+                with self.assertRaises(ValueError):
+                    contained_run_path(root, junction.name, "artifact.bin", kind="file")
+            finally:
+                os.rmdir(junction)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows drive-relative paths are platform-specific")
+    def test_drive_relative_workspace_is_rejected_before_run_or_model_creation(self) -> None:
+        from argparse import Namespace
+        from unittest.mock import patch
+
+        from spikes.gate_f_runner.__main__ import _model
+
+        workspace = Path("C:relative\\workspace")
+        with patch("spikes.gate_f_runner.runtime.Path.mkdir", wraps=Path.mkdir) as mkdir:
+            with self.assertRaisesRegex(SpecValidationError, "workspace root"):
+                RunWorkspace(workspace, "run.drive-relative").create()
+        mkdir.assert_not_called()
+
+        with patch("spikes.gate_f_runner.model_worker.run_model_worker") as worker:
+            with patch("spikes.gate_f_runner.runtime.Path.mkdir", wraps=Path.mkdir) as mkdir:
+                code = _model(
+                    Namespace(
+                        run_id="run.model-drive-relative",
+                        timeout_seconds=1,
+                        workspace_root=workspace,
+                        source=Path("source.png"),
+                    )
+                )
+        self.assertEqual(70, code)
+        worker.assert_not_called()
+        mkdir.assert_not_called()
+
+    def test_run_workspace_rejects_symlinked_workspace_root_before_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            outside = parent / "outside"
+            outside.mkdir()
+            linked_root = parent / "workspace-link"
+            try:
+                linked_root.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+
+            with self.assertRaisesRegex(SpecValidationError, "workspace root"):
+                RunWorkspace(linked_root, "run.workspace-link").create()
+            self.assertFalse((outside / "run.workspace-link").exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_run_workspace_and_model_command_reject_junctioned_workspace_root(self) -> None:
+        import os
+        from argparse import Namespace
+        from unittest.mock import patch
+        from spikes.gate_f_runner.__main__ import _model
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            outside = parent / "outside"
+            outside.mkdir()
+            junction = parent / "workspace-junction"
+            completed = subprocess.run(
+                f'mklink /J "{junction}" "{outside}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(junction, "is_junction", lambda: False)():
+                self.skipTest("directory junctions are unavailable")
+            try:
+                with self.assertRaisesRegex(SpecValidationError, "workspace root"):
+                    RunWorkspace(junction, "run.workspace-junction").create()
+                with patch("spikes.gate_f_runner.model_worker.run_model_worker") as worker:
+                    code = _model(
+                        Namespace(
+                            run_id="run.model-junction",
+                            timeout_seconds=1,
+                            workspace_root=junction,
+                            source=parent / "source.png",
+                        )
+                    )
+                self.assertEqual(70, code)
+                worker.assert_not_called()
+                self.assertFalse((outside / "run.workspace-junction").exists())
+                self.assertFalse((outside / "run.model-junction").exists())
+            finally:
+                os.rmdir(junction)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_run_workspace_and_model_cli_reject_nested_ancestor_junction(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            outside = parent / "outside"
+            outside.mkdir()
+            junction = parent / "workspace-parent-junction"
+            completed = subprocess.run(
+                f'mklink /J "{junction}" "{outside}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(junction, "is_junction", lambda: False)():
+                self.skipTest("directory junctions are unavailable")
+            workspace_root = junction / "nested" / "workspace"
+            try:
+                with self.assertRaisesRegex(SpecValidationError, "workspace root"):
+                    RunWorkspace(workspace_root, "run.workspace-nested-junction").create()
+                self.assertFalse((outside / "nested").exists())
+
+                model = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "spikes.gate_f_runner",
+                        "model",
+                        "--source",
+                        str(parent / "source.png"),
+                        "--run-id",
+                        "run.model-nested-junction",
+                        "--workspace-root",
+                        str(workspace_root),
+                        "--timeout-seconds",
+                        "1",
+                    ],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(70, model.returncode)
+                self.assertIn("model spike failed", model.stderr)
+                self.assertNotIn("Traceback", model.stderr)
+                self.assertFalse((outside / "nested").exists())
+            finally:
+                os.rmdir(junction)
 
     def test_duplicate_json_key_is_rejected(self) -> None:
         with self.assertRaises(SpecValidationError):
@@ -399,10 +600,180 @@ class GateFRunnerTests(unittest.TestCase):
             self.assertNotIn("Traceback", completed.stderr)
             self.assertNotIn(directory, completed.stderr)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX host-shell policy is platform-specific")
+    def test_model_cli_rejects_windows_drive_absolute_source_from_posix_host_shell(self) -> None:
+        reason_code = "WINDOWS_SOURCE_PATH_REQUIRES_WINDOWS_HOST_SHELL"
+        for index, windows_source in enumerate(("C:/Users/artist/source.png", "C:\\Users\\artist\\source.png")):
+            with self.subTest(windows_source=windows_source), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory) / "workspace"
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "spikes.gate_f_runner",
+                        "model",
+                        "--source",
+                        windows_source,
+                        "--run-id",
+                        f"run.posix-windows-source-{index}",
+                        "--workspace-root",
+                        str(workspace),
+                        "--timeout-seconds",
+                        "1",
+                    ],
+                    cwd=ROOT,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(64, completed.returncode)
+                self.assertEqual("", completed.stdout)
+                self.assertEqual(f"{reason_code}\n", completed.stderr)
+                self.assertNotIn(windows_source, completed.stderr)
+                self.assertFalse(workspace.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows host-shell policy is platform-specific")
+    def test_model_cli_accepts_forward_slash_drive_absolute_source_for_normalization_on_windows_host(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+
+        from spikes.gate_f_runner.__main__ import main
+
+        windows_source = Path("C:/Users/artist/source.png")
+        self.assertTrue(windows_source.is_absolute())
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            argv = [
+                "gate-f-runner",
+                "model",
+                "--source",
+                str(windows_source),
+                "--run-id",
+                "run.windows-source",
+                "--workspace-root",
+                str(workspace),
+                "--timeout-seconds",
+                "1",
+            ]
+            result = {
+                "profile_id": "model.profile.test",
+                "gate_f_status": "GATE_F_NOT_EVALUATED",
+            }
+            report_path = workspace / "run.windows-source" / "workbench-report.json"
+
+            def normalized_workbench(*args: object, **kwargs: object) -> tuple[Path, dict[str, object], dict[str, object]]:
+                report_path.parent.mkdir()
+                (report_path.parent / "model-result.json").write_text("{}\n", encoding="utf-8")
+                return report_path, {}, result
+
+            source_bytes = b"\x89PNG\r\n\x1a\nsource"
+            with patch("sys.argv", argv), patch(
+                "spikes.gate_f_runner.__main__.read_bounded_file",
+                return_value=source_bytes,
+            ) as reader, patch(
+                "spikes.gate_f_runner.model_workbench.run_normalized_model_workbench",
+                side_effect=normalized_workbench,
+            ) as workbench, patch(
+                "spikes.gate_f_runner.model_worker.run_model_worker",
+            ) as worker, redirect_stdout(StringIO()):
+                self.assertEqual(0, main())
+            reader.assert_called_once()
+            self.assertEqual(windows_source, reader.call_args.args[0])
+            self.assertEqual(source_bytes, workbench.call_args.args[2])
+            self.assertEqual("image/png", workbench.call_args.args[3])
+            self.assertIs(worker, workbench.call_args.args[4])
+            self.assertTrue((workspace / "run.windows-source" / "model-result.json").is_file())
+
+    def test_cancel_is_idempotent_only_for_regular_nonreparse_sentinel(self) -> None:
+        from argparse import Namespace
+        from unittest.mock import patch
+
+        from spikes.gate_f_runner.__main__ import _cancel
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run.cancel-regular"
+            run_dir.mkdir()
+            args = Namespace(run_id=run_dir.name, workspace_root=root)
+            self.assertEqual(0, _cancel(args))
+            sentinel = run_dir / "cancel.request"
+            self.assertTrue(stat.S_ISREG(sentinel.lstat().st_mode))
+            with patch("spikes.gate_f_runner.runtime.os.open") as open_file:
+                self.assertEqual(0, _cancel(args))
+            open_file.assert_not_called()
+
+            sentinel.unlink()
+            sentinel.mkdir()
+            self.assertEqual(64, _cancel(args))
+
+    def test_cancel_rejects_dangling_symlink_and_symlinked_ancestor_without_writes(self) -> None:
+        from argparse import Namespace
+        from unittest.mock import patch
+
+        from spikes.gate_f_runner.__main__ import _cancel
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run.cancel-dangling"
+            run_dir.mkdir()
+            sentinel = run_dir / "cancel.request"
+            try:
+                sentinel.symlink_to(root / "missing")
+            except OSError:
+                self.skipTest("file symlinks are unavailable")
+            with patch("spikes.gate_f_runner.runtime.os.open") as open_file:
+                self.assertEqual(64, _cancel(Namespace(run_id=run_dir.name, workspace_root=root)))
+            open_file.assert_not_called()
+
+            outside = root / "outside"
+            outside.mkdir()
+            linked_run = root / "run.cancel-linked"
+            try:
+                linked_run.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+            with patch("spikes.gate_f_runner.runtime.os.open") as open_file:
+                self.assertEqual(64, _cancel(Namespace(run_id=linked_run.name, workspace_root=root)))
+            open_file.assert_not_called()
+            self.assertFalse((outside / "cancel.request").exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_cancel_rejects_nested_workspace_ancestor_junction_without_writes(self) -> None:
+        from argparse import Namespace
+        from unittest.mock import patch
+
+        from spikes.gate_f_runner.__main__ import _cancel
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            outside = parent / "outside"
+            run_dir = outside / "nested" / "workspace" / "run.cancel-junction"
+            run_dir.mkdir(parents=True)
+            junction = parent / "workspace-parent-junction"
+            completed = subprocess.run(
+                f'mklink /J "{junction}" "{outside}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(junction, "is_junction", lambda: False)():
+                self.skipTest("directory junctions are unavailable")
+            try:
+                workspace = junction / "nested" / "workspace"
+                with patch("spikes.gate_f_runner.runtime.os.open") as open_file:
+                    self.assertEqual(64, _cancel(Namespace(run_id=run_dir.name, workspace_root=workspace)))
+                open_file.assert_not_called()
+                self.assertFalse((run_dir / "cancel.request").exists())
+            finally:
+                os.rmdir(junction)
+
     def test_cancel_filesystem_error_is_path_free(self) -> None:
         from argparse import Namespace
         from io import StringIO
         from unittest.mock import patch
+
         from spikes.gate_f_runner.__main__ import _cancel
 
         with tempfile.TemporaryDirectory() as directory:
@@ -410,7 +781,7 @@ class GateFRunnerTests(unittest.TestCase):
             run_dir = root / "run.cancel-error"
             run_dir.mkdir()
             stderr = StringIO()
-            with patch("pathlib.Path.touch", side_effect=PermissionError), patch("sys.stderr", stderr):
+            with patch("spikes.gate_f_runner.runtime.os.open", side_effect=PermissionError), patch("sys.stderr", stderr):
                 code = _cancel(Namespace(run_id="run.cancel-error", workspace_root=root))
             self.assertEqual(70, code)
             self.assertNotIn(directory, stderr.getvalue())

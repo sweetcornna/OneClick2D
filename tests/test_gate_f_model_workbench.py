@@ -1,20 +1,31 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import importlib
 import json
+import os
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from functools import cache
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest import mock
 
+from spikes.gate_f_runner.__main__ import main
 from spikes.gate_f_runner.contracts import StageContractError
 from spikes.gate_f_runner.gui_server import GuiState
+from spikes.gate_f_runner.model_candidate import generate_model_candidate_preflight
+from spikes.gate_f_runner.model_motion_draft import generate_model_motion_draft
 from spikes.gate_f_runner.model_workbench import (
     MODEL_CANVAS_SIZE,
     MODEL_PHASES,
+    TRUSTED_MODEL_SOURCE_NAME,
+    _load_normalization_evidence,
+    _neutral_fidelity,
     build_model_workbench_report,
     load_model_workbench_report,
     run_uploaded_model_workbench,
@@ -28,7 +39,7 @@ from spikes.gate_f_runner.model_worker import (
     PROFILE_ID,
     _load_profile,
 )
-from spikes.gate_f_runner.runtime import canonical_json_bytes, sha256_bytes, sha256_file
+from spikes.gate_f_runner.runtime import canonical_json_bytes, read_bounded_file, sha256_bytes, sha256_file
 from tests.test_gate_f_model_worker import _minimal_psd
 from tests.test_gate_f_simple_cutout import purpose_created_asymmetric_png
 
@@ -83,11 +94,18 @@ def _profile_psd(data: bytes, channels: int) -> bytes:
     return bytes(value[: -(2 * 2 * channels)]) + bytes(MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE * channels)
 
 
-def write_model_fixture(run_dir: Path, source_sha256: str = "1" * 64, *, publish_result: bool = True) -> dict[str, object]:
+def write_model_fixture(run_dir: Path, source_sha256: str | None = None, *, publish_result: bool = True) -> dict[str, object]:
     output = run_dir / "model-output"
     images = output / "input" / "input"
     images.mkdir(parents=True)
-    rgba = _png("RGBA")
+    trusted_source = run_dir / TRUSTED_MODEL_SOURCE_NAME
+    if trusted_source.exists():
+        rgba = trusted_source.read_bytes()
+    else:
+        rgba = _png("RGBA")
+        trusted_source.write_bytes(rgba)
+    if source_sha256 is None:
+        source_sha256 = sha256_bytes(rgba)
     depth = _png("L")
     (images / "reconstruction.png").write_bytes(rgba)
     (images / "src_img.png").write_bytes(rgba)
@@ -172,7 +190,62 @@ def refresh_model_inventory(run_dir: Path, result: dict[str, object], *, publish
         (run_dir / "model-result.json").write_bytes(canonical_json_bytes(result))
 
 
+class GateFModelWorkbenchContractTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows drive-relative paths are platform-specific")
+    def test_uploaded_model_rejects_drive_relative_workspace_before_worker_or_writes(self) -> None:
+        workspace = Path("C:relative\\uploaded-model-workspace")
+        with mock.patch("spikes.gate_f_runner.model_workbench.run_model_worker") as worker:
+            with mock.patch("spikes.gate_f_runner.runtime.Path.mkdir", wraps=Path.mkdir) as mkdir:
+                with self.assertRaises(ValueError):
+                    run_uploaded_model_workbench(
+                        workspace,
+                        "run.model-workbench-drive-relative",
+                        purpose_created_asymmetric_png(),
+                        "image/png",
+                    )
+        worker.assert_not_called()
+        mkdir.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_uploaded_model_rejects_nested_workspace_ancestor_junction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            junction = root / "workspace-parent-junction"
+            completed = subprocess.run(
+                f'mklink /J "{junction}" "{outside}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(junction, "is_junction", lambda: False)():
+                self.skipTest("directory junctions are unavailable")
+            try:
+                with mock.patch("spikes.gate_f_runner.model_workbench.run_model_worker") as worker:
+                    with self.assertRaises(ValueError):
+                        run_uploaded_model_workbench(
+                            junction / "nested" / "workspace",
+                            "run.model-workbench-junction",
+                            purpose_created_asymmetric_png(),
+                            "image/png",
+                        )
+                worker.assert_not_called()
+                self.assertFalse((outside / "nested").exists())
+            finally:
+                os.rmdir(junction)
+
+
+@unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
 class GateFModelWorkbenchTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        import PIL
+
+        if PIL.__version__ != "12.1.0":
+            raise unittest.SkipTest("model workbench requires locked Pillow 12.1.0")
+
     def test_imports_fixed_model_identity_layers_and_allowlisted_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -193,7 +266,12 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             self.assertTrue(report["depth_psd"]["structural_readback_pass"])
             self.assertEqual("review_required", report["quality"]["status"])
             self.assertEqual("pass", report["quality"]["neutral_fidelity"]["status"])
+            self.assertEqual("pass", report["quality"]["source_trust"]["status"])
+            self.assertEqual([], report["quality"]["reason_codes"])
             self.assertEqual(1.0, report["quality"]["neutral_fidelity"]["source_rgb_exact_ratio"])
+            self.assertEqual(1.0, report["quality"]["neutral_fidelity"]["source_visible_coverage_ratio"])
+            self.assertEqual(TRUSTED_MODEL_SOURCE_NAME, report["model"]["trusted_source"]["uri"])
+            self.assertEqual(report["model"]["source_sha256"], report["model"]["trusted_source"]["sha256"])
             self.assertEqual("available", report["capabilities"]["source_comparison"])
             self.assertEqual("not_generated", report["capabilities"]["dynamic_preview"])
 
@@ -224,6 +302,30 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             report = build_model_workbench_report(run_dir, run_dir.name, result)
             self.assertEqual(LEGACY_PROFILE_ID, report["model"]["identity"]["profile_id"])
             self.assertEqual("not_applied", report["model"]["identity"]["postprocess_algorithm"])
+
+    def test_import_without_retained_trusted_source_cannot_activate_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.model-missing-trusted-source"
+            run_dir.mkdir()
+            write_model_fixture(run_dir)
+            (run_dir / TRUSTED_MODEL_SOURCE_NAME).unlink()
+
+            report = load_model_workbench_report(run_dir)
+
+            self.assertFalse(report["model_used"])
+            self.assertIsNone(report["model"]["trusted_source"])
+            self.assertEqual("review_required", report["quality"]["source_trust"]["status"])
+            self.assertEqual(
+                ["MODEL_TRUSTED_SOURCE_EVIDENCE_MISSING"],
+                report["quality"]["reason_codes"],
+            )
+            self.assertEqual("review_required", report["quality"]["neutral_fidelity"]["status"])
+            with self.assertRaisesRegex(
+                StageContractError,
+                "requires a fidelity-passing active model profile",
+            ):
+                generate_model_motion_draft(run_dir)
+            self.assertFalse((run_dir / "motion-draft").exists())
 
     def test_imports_legacy_source_preserve_profile_with_original_algorithm(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -256,6 +358,47 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             self.assertGreater(fidelity["source_rgb_mae"], 100)
             self.assertIn("neutral_visible_pixel_fidelity", report["quality"]["review_items"])
 
+    def test_neutral_fidelity_rejects_one_pixel_reconstruction_of_opaque_source(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.model-coverage"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            reconstruction_path = run_dir / "model-output" / "input" / "input" / "reconstruction.png"
+            with Image.new("RGBA", (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE), (0, 0, 0, 0)) as reconstruction:
+                reconstruction.putpixel((0, 0), (30, 90, 160, 220))
+                reconstruction.save(reconstruction_path, format="PNG")
+            refresh_model_inventory(run_dir, result)
+
+            fidelity = build_model_workbench_report(run_dir, run_dir.name, result)["quality"]["neutral_fidelity"]
+
+            self.assertEqual("review_required", fidelity["status"])
+            self.assertEqual(MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE, fidelity["source_visible_pixel_count"])
+            self.assertEqual(1, fidelity["reconstruction_visible_pixel_count"])
+            self.assertEqual(1, fidelity["source_visible_covered_pixel_count"])
+            self.assertEqual(MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE - 1, fidelity["source_visible_omission_count"])
+            self.assertLess(fidelity["source_visible_coverage_ratio"], 0.00001)
+
+    def test_neutral_fidelity_exact_ratio_detects_each_rgb_channel_delta(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.png"
+            reconstruction_path = root / "reconstruction.png"
+            with Image.new("RGBA", (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE), (10, 20, 30, 255)) as source:
+                source.save(source_path, format="PNG")
+            for channel in range(3):
+                color = [10, 20, 30, 255]
+                color[channel] += 1
+                with self.subTest(channel=channel):
+                    with Image.new("RGBA", (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE), tuple(color)) as reconstruction:
+                        reconstruction.save(reconstruction_path, format="PNG")
+                    fidelity = _neutral_fidelity(source_path, reconstruction_path)
+                    self.assertEqual(0.0, fidelity["source_rgb_exact_ratio"])
+                    self.assertEqual([1.0 if index == channel else 0.0 for index in range(3)], fidelity["source_rgb_channel_mae"])
+
     def test_uploaded_model_uses_normalized_png_and_publishes_only_after_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -279,7 +422,12 @@ class GateFModelWorkbenchTests(unittest.TestCase):
                 )
             self.assertEqual(b"\x89PNG\r\n\x1a\n", observed["signature"])
             self.assertEqual(3600, observed["timeout"])
-            self.assertEqual(report["normalization"]["artifact"]["sha256"], report["model"]["source_sha256"])
+            self.assertEqual(report["model"]["trusted_source"]["sha256"], report["model"]["source_sha256"])
+            self.assertEqual("pass", report["quality"]["source_trust"]["status"])
+            self.assertEqual(
+                report["normalization"]["artifact"]["sha256"],
+                report["quality"]["source_trust"]["normalized_source_sha256"],
+            )
             self.assertEqual([{"id": phase, "state": "completed"} for phase in MODEL_PHASES], report["phases"])
             self.assertEqual(report, json.loads(report_path.read_text(encoding="utf-8")))
             self.assertEqual(("MODEL_RESULT_PUBLISH", "completed"), phase_events[-1])
@@ -290,6 +438,181 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             )
             self.assertEqual(report, GuiState(root).workbench_status("run.model-upload"))
 
+    def test_model_cli_publishes_trusted_source_and_reaches_motion_and_candidate(self) -> None:
+        from tests.test_gate_f_model_motion_draft import _sparse_model_source
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            run_id = "run.model-cli-workflow"
+            run_dir = workspace / run_id
+            source_path = root / "source.png"
+            with _sparse_model_source() as source:
+                source.save(source_path, format="PNG")
+
+            def worker(source: Path, output: Path, *, timeout_seconds: int) -> dict[str, object]:
+                self.assertEqual(run_dir / TRUSTED_MODEL_SOURCE_NAME, source)
+                self.assertTrue(source.is_file())
+                self.assertEqual(17, timeout_seconds)
+                result = write_model_fixture(output.parent, sha256_file(source), publish_result=False)
+                image_root = output / "input" / "input"
+                with _sparse_model_source(image_root) as reconstruction:
+                    reconstruction.save(image_root / "reconstruction.png", format="PNG")
+                    reconstruction.save(image_root / "src_img.png", format="PNG")
+                    reconstruction.save(image_root / "src_head.png", format="PNG")
+                refresh_model_inventory(output.parent, result)
+                return result
+
+            argv = [
+                "gate-f-runner",
+                "model",
+                "--source",
+                str(source_path),
+                "--run-id",
+                run_id,
+                "--workspace-root",
+                str(workspace),
+                "--timeout-seconds",
+                "17",
+            ]
+            with mock.patch("sys.argv", argv), mock.patch(
+                "spikes.gate_f_runner.model_worker.run_model_worker",
+                side_effect=worker,
+            ), contextlib.redirect_stdout(StringIO()):
+                self.assertEqual(0, main())
+
+            report = load_model_workbench_report(run_dir)
+            self.assertTrue(report["model_used"])
+            self.assertEqual("pass", report["quality"]["source_trust"]["status"])
+            self.assertEqual([], report["quality"]["reason_codes"])
+            self.assertEqual(
+                report["model"]["source_sha256"],
+                report["model"]["trusted_source"]["sha256"],
+            )
+            self.assertIn("normalization", report)
+
+            _, motion = generate_model_motion_draft(run_dir)
+            self.assertEqual(37, len(motion["frames"]))
+            _, candidate = generate_model_candidate_preflight(run_dir)
+            self.assertEqual("LOCAL_MODEL_CANDIDATE_PREFLIGHT_COMPLETED", candidate["local_status"])
+            self.assertEqual("GATE_F_NOT_EVALUATED", candidate["gate_f_status"])
+
+    def test_uploaded_model_rejects_worker_rewritten_source_reference_and_reconstruction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def worker(source: Path, output: Path, *, timeout_seconds: int) -> dict[str, object]:
+                result = write_model_fixture(output.parent, sha256_file(source), publish_result=False)
+                images = output / "input" / "input"
+                rewritten = _png("RGBA")
+                (images / "src_img.png").write_bytes(rewritten)
+                (images / "reconstruction.png").write_bytes(rewritten)
+                refresh_model_inventory(output.parent, result)
+                return result
+
+            with mock.patch("spikes.gate_f_runner.model_workbench.run_model_worker", side_effect=worker):
+                report_path, report = run_uploaded_model_workbench(
+                    root,
+                    "run.model-source-rewrite",
+                    purpose_created_asymmetric_png(),
+                    "image/png",
+                )
+
+            self.assertFalse(report["model_used"])
+            self.assertEqual("review_required", report["quality"]["status"])
+            self.assertEqual("review_required", report["quality"]["source_trust"]["status"])
+            self.assertEqual("review_required", report["quality"]["neutral_fidelity"]["status"])
+            self.assertEqual(
+                ["MODEL_SOURCE_REFERENCE_RGBA_MISMATCH"],
+                report["quality"]["reason_codes"],
+            )
+            self.assertIn("trusted_source_reference", report["quality"]["review_items"])
+            self.assertEqual(report, json.loads(report_path.read_text(encoding="utf-8")))
+            self.assertEqual(report, load_model_workbench_report(root / "run.model-source-rewrite"))
+
+    def test_normalization_manifest_uri_escape_rejects_before_descriptor_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_id = "run.model-normalization-escape"
+
+            def worker(source: Path, output: Path, *, timeout_seconds: int) -> dict[str, object]:
+                return write_model_fixture(output.parent, sha256_file(source), publish_result=False)
+
+            with mock.patch("spikes.gate_f_runner.model_workbench.run_model_worker", side_effect=worker):
+                run_uploaded_model_workbench(root, run_id, purpose_created_asymmetric_png(), "image/png")
+            run_dir = root / run_id
+            manifest_path = run_dir / "run-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["stages"][0]["outputs"][0]["uri"] = "../outside.png"
+            manifest_bytes = canonical_json_bytes(manifest)
+            manifest_path.write_bytes(manifest_bytes)
+            (run_dir / "run-manifest.sha256").write_bytes((sha256_bytes(manifest_bytes) + "\n").encode("ascii"))
+
+            with mock.patch("spikes.gate_f_runner.model_workbench.sha256_file") as digest, mock.patch(
+                "spikes.gate_f_runner.model_workbench.read_bounded_file", wraps=read_bounded_file
+            ) as bounded:
+                with self.assertRaisesRegex(StageContractError, "descriptor is invalid"):
+                    _load_normalization_evidence(run_dir)
+            digest.assert_not_called()
+            self.assertEqual(["run-manifest.json", "run-manifest.sha256"], [call.args[0].name for call in bounded.call_args_list])
+
+    def test_normalization_manifest_rejects_extra_inventory_before_artifact_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_id = "run.model-normalization-extra"
+
+            def worker(source: Path, output: Path, *, timeout_seconds: int) -> dict[str, object]:
+                return write_model_fixture(output.parent, sha256_file(source), publish_result=False)
+
+            with mock.patch("spikes.gate_f_runner.model_workbench.run_model_worker", side_effect=worker):
+                run_uploaded_model_workbench(root, run_id, purpose_created_asymmetric_png(), "image/png")
+            run_dir = root / run_id
+            (run_dir / "committed" / "unexpected.bin").write_bytes(b"must not be read")
+
+            with mock.patch("spikes.gate_f_runner.model_workbench.sha256_file") as digest, mock.patch(
+                "spikes.gate_f_runner.model_workbench.read_bounded_file", wraps=read_bounded_file
+            ) as bounded:
+                with self.assertRaisesRegex(StageContractError, "inventory is not exact"):
+                    _load_normalization_evidence(run_dir)
+            digest.assert_not_called()
+            self.assertEqual(["run-manifest.json", "run-manifest.sha256"], [call.args[0].name for call in bounded.call_args_list])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_normalization_manifest_internal_junction_rejects_before_descriptor_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_id = "run.model-normalization-junction"
+
+            def worker(source: Path, output: Path, *, timeout_seconds: int) -> dict[str, object]:
+                return write_model_fixture(output.parent, sha256_file(source), publish_result=False)
+
+            with mock.patch("spikes.gate_f_runner.model_workbench.run_model_worker", side_effect=worker):
+                run_uploaded_model_workbench(root, run_id, purpose_created_asymmetric_png(), "image/png")
+            run_dir = root / run_id
+            committed = run_dir / "committed"
+            outside = root / "outside-committed"
+            committed.rename(outside)
+            completed = subprocess.run(
+                f'mklink /J "{committed}" "{outside}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(committed, "is_junction", lambda: False)():
+                outside.rename(committed)
+                self.skipTest("directory junctions are unavailable")
+            try:
+                with mock.patch("spikes.gate_f_runner.model_workbench.sha256_file") as digest, mock.patch(
+                    "spikes.gate_f_runner.model_workbench.read_bounded_file", wraps=read_bounded_file
+                ) as bounded:
+                    with self.assertRaisesRegex(StageContractError, "manifest URI is invalid"):
+                        _load_normalization_evidence(run_dir)
+                digest.assert_not_called()
+                self.assertEqual(["run-manifest.json", "run-manifest.sha256"], [call.args[0].name for call in bounded.call_args_list])
+            finally:
+                os.rmdir(committed)
+
     def test_rejects_tampered_model_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory) / "run.model-tamper"
@@ -298,6 +621,91 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             (run_dir / "model-output" / "input" / "input" / "face.png").write_bytes(b"tampered")
             with self.assertRaisesRegex(StageContractError, "does not match its inventory"):
                 build_model_workbench_report(run_dir, run_dir.name, result)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_rejects_junctioned_model_output_before_evidence_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run.model-output-junction"
+            run_dir.mkdir()
+            outside_run = root / "outside-run"
+            outside_run.mkdir()
+            result = write_model_fixture(outside_run, publish_result=False)
+            junction = run_dir / "model-output"
+            outside_output = outside_run / "model-output"
+            completed = subprocess.run(
+                f'mklink /J "{junction}" "{outside_output}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(junction, "is_junction", lambda: False)():
+                self.skipTest("directory junctions are unavailable")
+            try:
+                with mock.patch("spikes.gate_f_runner.model_workbench.sha256_file") as digest:
+                    with self.assertRaisesRegex(StageContractError, "file inventory"):
+                        build_model_workbench_report(run_dir, run_dir.name, result)
+                digest.assert_not_called()
+            finally:
+                os.rmdir(junction)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_rejects_junctioned_model_output_intermediate_before_evidence_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run.model-intermediate-junction"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            output = run_dir / "model-output"
+            original_input = output / "input"
+            outside_input = root / "outside-input"
+            original_input.rename(outside_input)
+            completed = subprocess.run(
+                f'mklink /J "{original_input}" "{outside_input}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(original_input, "is_junction", lambda: False)():
+                outside_input.rename(original_input)
+                self.skipTest("directory junctions are unavailable")
+            try:
+                with mock.patch("spikes.gate_f_runner.model_workbench.sha256_file") as digest:
+                    with self.assertRaisesRegex(StageContractError, "does not match its inventory"):
+                        build_model_workbench_report(run_dir, run_dir.name, result)
+                digest.assert_not_called()
+            finally:
+                os.rmdir(original_input)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_rejects_unindexed_nested_junction_before_artifact_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run.model-unindexed-junction"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            outside = root / "outside-unindexed"
+            outside.mkdir()
+            (outside / "ignored.bin").write_bytes(b"must not be read")
+            junction = run_dir / "model-output" / "input" / "input" / "unindexed"
+            completed = subprocess.run(
+                f'mklink /J "{junction}" "{outside}"',
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not getattr(junction, "is_junction", lambda: False)():
+                self.skipTest("directory junctions are unavailable")
+            try:
+                with mock.patch("spikes.gate_f_runner.model_workbench.sha256_file") as digest:
+                    with self.assertRaisesRegex(StageContractError, "unsafe entry"):
+                        build_model_workbench_report(run_dir, run_dir.name, result)
+                digest.assert_not_called()
+            finally:
+                os.rmdir(junction)
 
     def test_rejects_structurally_invalid_depth_psd_even_when_inventory_matches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -342,6 +750,28 @@ class GateFModelWorkbenchTests(unittest.TestCase):
                 state.workbench_status(run_dir.name)
             self.assertEqual([], state.list_workbenches())
 
+    def test_gui_model_load_rejects_unindexed_file_without_hashing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run.model-unindexed-large"
+            run_dir.mkdir()
+            write_model_fixture(run_dir)
+            unindexed = run_dir / "model-output" / "unindexed-large.bin"
+            with unindexed.open("wb") as stream:
+                stream.truncate(600 * 1024 * 1024)
+            real_digest = sha256_file
+
+            def guarded_digest(path: Path) -> str:
+                if path == unindexed:
+                    self.fail("unindexed file must not be hashed")
+                return real_digest(path)
+
+            with mock.patch("spikes.gate_f_runner.model_workbench.sha256_file", side_effect=guarded_digest), mock.patch(
+                "spikes.gate_f_runner.gui_server.sha256_file", side_effect=guarded_digest
+            ):
+                with self.assertRaisesRegex(StageContractError, "inventory is incomplete"):
+                    GuiState(root).workbench_status(run_dir.name)
+
     def test_model_report_cache_invalidates_when_artifact_changes_or_disappears(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -349,7 +779,10 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             run_dir.mkdir()
             write_model_fixture(run_dir)
             state = GuiState(root)
-            self.assertTrue(state.workbench_status(run_dir.name)["model_used"])
+            with mock.patch("spikes.gate_f_runner.gui_server.load_model_workbench_report", wraps=load_model_workbench_report) as loader:
+                self.assertTrue(state.workbench_status(run_dir.name)["model_used"])
+                self.assertTrue(state.workbench_status(run_dir.name)["model_used"])
+            self.assertEqual(2, loader.call_count)
             face = run_dir / "model-output" / "input" / "input" / "face.png"
             changed = bytearray(face.read_bytes())
             changed[-1] ^= 1
