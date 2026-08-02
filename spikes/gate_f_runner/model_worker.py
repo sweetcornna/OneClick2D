@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import io
 import json
@@ -10,6 +11,7 @@ import math
 import os
 import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -62,6 +64,7 @@ MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES = 64
 MAX_MODEL_ARTIFACT_MANIFEST_NODES = 320
 MAX_MODEL_ARTIFACT_MANIFEST_DEPTH = 8
 MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES = 512
+MODEL_ARTIFACT_MANIFEST_HASH_CHUNK_BYTES = 1024 * 1024
 MODEL_PART_NAMES = (
     "front hair",
     "back hair",
@@ -869,6 +872,39 @@ def _bounded_artifact_files(
     return sorted(files, key=lambda item: item[0])
 
 
+def _bounded_artifact_digest(path: Path, maximum: int) -> tuple[str, int]:
+    """Hash one manifest artifact in bounded chunks so peak memory stays constant.
+
+    Mirrors the pinned v5 entrypoint's ``_sha256_file`` bound and chunk size, so the
+    trusted parent and the entrypoint agree on when a file is over budget instead of
+    the parent buffering a whole ``MAX_MODEL_RESULT_BYTES`` artifact to find out.
+    """
+    digest = hashlib.sha256()
+    byte_length = 0
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise StageContractError(
+                "model entrypoint artifact manifest contains a non-regular node"
+            )
+        with path.open("rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise StageContractError(
+                    "model entrypoint artifact manifest contains a non-regular node"
+                )
+            while chunk := stream.read(
+                min(MODEL_ARTIFACT_MANIFEST_HASH_CHUNK_BYTES, maximum - byte_length + 1)
+            ):
+                byte_length += len(chunk)
+                if byte_length > maximum:
+                    raise StageContractError(
+                        "model entrypoint artifact manifest byte count exceeded its bound"
+                    )
+                digest.update(chunk)
+    except (OSError, ValueError) as exc:
+        raise StageContractError("model entrypoint artifact manifest file is unreadable") from exc
+    return digest.hexdigest(), byte_length
+
+
 def _artifact_manifest(root: Path, attestation_path: Path) -> list[dict[str, object]]:
     manifest: list[dict[str, object]] = []
     total = 0
@@ -877,18 +913,15 @@ def _artifact_manifest(root: Path, attestation_path: Path) -> list[dict[str, obj
             raise StageContractError(
                 "model entrypoint artifact manifest byte count exceeded its bound"
             )
-        try:
-            exact = read_bounded_file(candidate, MAX_MODEL_RESULT_BYTES - total)
-        except (OSError, ValueError) as exc:
-            raise StageContractError("model entrypoint artifact manifest file is unreadable") from exc
-        if len(exact) != size:
+        digest, byte_length = _bounded_artifact_digest(candidate, MAX_MODEL_RESULT_BYTES - total)
+        if byte_length != size:
             raise StageContractError("model entrypoint artifact manifest file changed while hashing")
-        total += len(exact)
+        total += byte_length
         manifest.append(
             {
                 "path": relative,
-                "sha256": sha256_bytes(exact),
-                "byte_length": len(exact),
+                "sha256": digest,
+                "byte_length": byte_length,
             }
         )
     if not any(str(item["path"]).endswith(".psd") for item in manifest):
@@ -1220,16 +1253,16 @@ def _inventory(directory: Path) -> list[dict[str, object]]:
         if size > MAX_MODEL_RESULT_BYTES - total:
             raise StageContractError("model worker result exceeded its bound")
         try:
-            exact = read_bounded_file(path, MAX_MODEL_RESULT_BYTES - total)
-        except (OSError, ValueError) as exc:
+            digest, byte_length = _bounded_artifact_digest(path, MAX_MODEL_RESULT_BYTES - total)
+        except StageContractError as exc:
             raise StageContractError("model worker output file is unreadable") from exc
-        if len(exact) != size:
+        if byte_length != size:
             raise StageContractError("model worker output file changed while hashing")
-        total += len(exact)
+        total += byte_length
         files.append({
             "uri": relative,
-            "byte_length": len(exact),
-            "sha256": sha256_bytes(exact),
+            "byte_length": byte_length,
+            "sha256": digest,
         })
     if not files:
         raise StageContractError("model worker produced no files")

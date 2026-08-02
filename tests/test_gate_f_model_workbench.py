@@ -26,6 +26,7 @@ from spikes.gate_f_runner.model_workbench import (
     MODEL_CANVAS_SIZE,
     MODEL_PHASES,
     TRUSTED_MODEL_SOURCE_NAME,
+    _indexed_files,
     _load_normalization_evidence,
     _neutral_fidelity,
     _png_facts,
@@ -43,6 +44,8 @@ from spikes.gate_f_runner.model_worker import (
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
     LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+    MAX_MODEL_ARTIFACT_MANIFEST_DEPTH,
+    MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES,
     NF4_MARIGOLD_DEVICE_POLICY_ID,
     PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     PROFILE_ID,
@@ -1454,6 +1457,102 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             self.assertFalse((run_dir / "model-result.json").exists())
             self.assertFalse((run_dir / "workbench-report.json").exists())
             self.assertFalse((run_dir / "model-output").exists())
+
+
+class GateFModelWorkbenchInventoryTraversalBoundTests(unittest.TestCase):
+    """The workbench inventory walk must honour the same bounds as the manifest walk.
+
+    ``model-output`` is re-walked whenever a persisted report is reloaded, so the
+    worker's in-process ``_inventory`` bounds are not re-applied there. Without these
+    the reload path would traverse an arbitrarily wide or deep tree before the
+    described/discovered set comparison could reject it.
+    """
+
+    def _run_dir(self, root: Path) -> tuple[Path, dict[str, object]]:
+        run_dir = root / "run.inventory-bounds"
+        output_root = run_dir / "model-output"
+        output_root.mkdir(parents=True)
+        anchor = output_root / "anchor.bin"
+        anchor.write_bytes(b"anchor")
+        result: dict[str, object] = {
+            "files": [
+                {
+                    "uri": "anchor.bin",
+                    "byte_length": 6,
+                    "sha256": sha256_file(anchor),
+                }
+            ]
+        }
+        return run_dir, result
+
+    def _assert_rejects_before_hashing(
+        self,
+        run_dir: Path,
+        result: dict[str, object],
+        pattern: str,
+    ) -> None:
+        with mock.patch(
+            "spikes.gate_f_runner.model_workbench.sha256_file",
+            side_effect=lambda *args, **kwargs: self.fail(
+                "inventory bounds must reject before any artifact is hashed"
+            ),
+        ):
+            with self.assertRaisesRegex(StageContractError, pattern):
+                _indexed_files(run_dir, result)
+
+    def test_accepts_the_fixed_profile_output_shape(self) -> None:
+        """The bounds must not be tighter than a legitimate run's output tree."""
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir, result = self._run_dir(Path(directory))
+            indexed = _indexed_files(run_dir, result)
+        self.assertEqual({"anchor.bin"}, set(indexed))
+
+    def test_rejects_depth_over_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir, result = self._run_dir(Path(directory))
+            nested = run_dir / "model-output"
+            for level in range(MAX_MODEL_ARTIFACT_MANIFEST_DEPTH + 1):
+                nested = nested / f"level-{level}"
+            nested.mkdir(parents=True)
+            self._assert_rejects_before_hashing(run_dir, result, "depth exceeded")
+
+    def test_rejects_directory_count_over_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir, result = self._run_dir(Path(directory))
+            output_root = run_dir / "model-output"
+            for index in range(MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES + 1):
+                (output_root / f"group-{index:03d}").mkdir()
+            self._assert_rejects_before_hashing(run_dir, result, "directory count exceeded")
+
+    def test_rejects_node_count_over_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir, result = self._run_dir(Path(directory))
+            output_root = run_dir / "model-output"
+            (output_root / "extra-a.bin").write_bytes(b"")
+            (output_root / "extra-b.bin").write_bytes(b"")
+            with mock.patch(
+                "spikes.gate_f_runner.model_workbench.MAX_MODEL_ARTIFACT_MANIFEST_NODES", 2
+            ):
+                self._assert_rejects_before_hashing(run_dir, result, "node count exceeded")
+
+    def test_rejects_entry_count_over_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir, result = self._run_dir(Path(directory))
+            output_root = run_dir / "model-output"
+            (output_root / "extra-a.bin").write_bytes(b"")
+            (output_root / "extra-b.bin").write_bytes(b"")
+            with mock.patch(
+                "spikes.gate_f_runner.model_workbench.MAX_MODEL_ARTIFACT_MANIFEST_ENTRIES", 2
+            ):
+                self._assert_rejects_before_hashing(run_dir, result, "entry count exceeded")
+
+    def test_rejects_relative_path_over_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir, result = self._run_dir(Path(directory))
+            inner = run_dir / "model-output" / ("a" * 200) / ("b" * 200)
+            inner.mkdir(parents=True)
+            (inner / ("c" * 200)).write_bytes(b"")
+            self._assert_rejects_before_hashing(run_dir, result, "path length exceeded")
 
 
 if __name__ == "__main__":
