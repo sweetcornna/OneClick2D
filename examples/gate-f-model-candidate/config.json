@@ -1,0 +1,49 @@
+{
+  "format": "oneclick2d.model-candidate-config",
+  "format_version": "0.1.0",
+  "profile_id": "oc2d.spike.model-candidate.source-preserve-v4.v1",
+  "required_model_profile_id": "see-through.v3.nf4.1280.wsl2.source-preserve.v4",
+  "required_motion_profile_id": "oc2d.spike.model-motion-draft.affine-semantic.v13",
+  "required_pillow_version": "12.1.0",
+  "renderer_profile_id": "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2",
+  "ontology_registry": {
+    "id": "oneclick2d.ontology",
+    "version": "0.1.0",
+    "sha256": "ea03fdf0e757a9e15519b6fe7bad7ed50b7d736214cca3b8b74bfb9b57aa1c76"
+  },
+  "postprocess": {
+    "semantic_alpha_state": "source-preserve-v4-cleaned",
+    "visible_alpha_threshold": 31,
+    "visible_priority": [
+      "back hair",
+      "tail",
+      "wings",
+      "neck",
+      "topwear",
+      "bottomwear",
+      "legwear",
+      "footwear",
+      "face",
+      "ears",
+      "eyewhite",
+      "irides",
+      "eyebrow",
+      "nose",
+      "mouth",
+      "eyelash",
+      "front hair",
+      "headwear",
+      "neckwear",
+      "handwear",
+      "eyewear",
+      "earwear",
+      "objects"
+    ]
+  },
+  "frame_sequence": {
+    "format": "oneclick2d.gate-f-frame-sequence-config",
+    "format_version": "0.1.0",
+    "profile_id": "oc2d.spike.gate-f-frame-sequence.v1",
+    "seed_u64": "00000000000000000042"
+  }
+}

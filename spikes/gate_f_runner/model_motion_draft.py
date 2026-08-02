@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import math
 import os
 import shutil
@@ -27,13 +28,14 @@ from .raster import _load_pillow, _verify_output_png
 from .rendering import (
     Affine,
     RENDERER_CONTRACT_ID,
+    RENDERER_PROFILE_ID,
     RenderLayer,
     render_rgba_layers,
 )
 from .runtime import (
-    ID_RE,
     SHA256_RE,
     canonical_json_bytes,
+    contained_run_path,
     read_bounded_file,
     sha256_bytes,
     sha256_file,
@@ -45,7 +47,6 @@ CONFIG_PATH = ROOT / "examples" / "gate-f-model-motion-draft" / "config.json"
 CONFIG_SHA256 = "42a7effbde7deee0986fe1b216babf24b5d65f7f85400cf585e13239eb5d847e"
 PROFILE_ID = "oc2d.spike.model-motion-draft.affine-semantic.v13"
 ALGORITHM_ID = "source-visible-features-feathered-underpaint-grouped-eye-subject-matte-hard-edge-padded-quad-affine-premultiplied.v13"
-MOTION_RENDERER_PROFILE_ID = "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2"
 REPORT_NAME = "motion-report.json"
 OUTPUT_DIRECTORY = "motion-draft"
 CANVAS_SIZE = 1280
@@ -115,6 +116,23 @@ class MotionPart:
     image: Any
 
 
+@dataclass
+class MotionRecomputation:
+    layers: list[dict[str, object]]
+    layer_bytes: tuple[bytes, ...]
+    geometry: list[dict[str, object]]
+    parameters: list[dict[str, object]]
+    bindings: list[dict[str, object]]
+    sequence: dict[str, object]
+    frames: list[dict[str, object]]
+    frame_bytes: tuple[bytes, ...]
+    validation: dict[str, object]
+    underpaint_mask: Any
+
+    def close(self) -> None:
+        self.underpaint_mask.close()
+
+
 def _config() -> tuple[dict[str, object], Any, Any]:
     value = strict_load_json_bytes(read_bounded_file(CONFIG_PATH, 64 * 1024))
     if not isinstance(value, dict) or sha256_bytes(canonical_json_bytes(value)) != CONFIG_SHA256:
@@ -144,7 +162,46 @@ def _safe_identifier(value: str) -> str:
     return value.replace(" ", "-")
 
 
-def _underpaint_face(image: Any, backend: Any, feature_boxes: tuple[tuple[int, int, int, int], ...] = ()) -> Any:
+def _contained_run_file(run_dir: Path, relative: str) -> Path:
+    try:
+        return contained_run_path(run_dir.parent, run_dir.name, relative, kind="file")
+    except ValueError as exc:
+        raise StageContractError("model motion draft artifact path is invalid") from exc
+
+
+def _contained_run_directory(run_dir: Path) -> Path:
+    try:
+        return contained_run_path(run_dir.parent, run_dir.name, kind="directory")
+    except ValueError as exc:
+        raise StageContractError("model motion draft run directory is invalid") from exc
+
+
+def _rgba_difference_mask(left: Any, right: Any) -> Any:
+    from PIL import ImageChops
+
+    if left.mode != right.mode or left.mode != "RGBA" or left.size != right.size:
+        raise StageContractError("model motion draft difference inputs do not match")
+    difference = ImageChops.difference(left, right)
+    channels = difference.split()
+    maximum = channels[0].copy()
+    try:
+        for channel in channels[1:]:
+            merged = ImageChops.lighter(maximum, channel)
+            maximum.close()
+            maximum = merged
+        return maximum.point(lambda value: 255 if value > 0 else 0)
+    finally:
+        maximum.close()
+        for channel in channels:
+            channel.close()
+        difference.close()
+
+
+def _underpaint_face_with_mask(
+    image: Any,
+    backend: Any,
+    feature_boxes: tuple[tuple[int, int, int, int], ...] = (),
+) -> tuple[Any, Any]:
     from PIL import ImageChops, ImageDraw, ImageFilter, ImageStat
 
     alpha = image.getchannel("A")
@@ -175,7 +232,7 @@ def _underpaint_face(image: Any, backend: Any, feature_boxes: tuple[tuple[int, i
     if underpaint_mask.getbbox() is None:
         underpaint_mask.close()
         alpha.close()
-        return image.copy()
+        return image.copy(), backend.Image.new("L", image.size, 0)
     opaque = alpha.point(lambda value: 255 if value >= 240 else 0)
     rgb = image.convert("RGB")
     try:
@@ -187,7 +244,8 @@ def _underpaint_face(image: Any, backend: Any, feature_boxes: tuple[tuple[int, i
         result = image.copy()
         try:
             result.paste(fill, (0, 0), underpaint_mask)
-            return result
+            operation_mask = _rgba_difference_mask(result, image)
+            return result, operation_mask
         except Exception:
             result.close()
             raise
@@ -198,6 +256,12 @@ def _underpaint_face(image: Any, backend: Any, feature_boxes: tuple[tuple[int, i
         opaque.close()
         rgb.close()
         alpha.close()
+
+
+def _underpaint_face(image: Any, backend: Any, feature_boxes: tuple[tuple[int, int, int, int], ...] = ()) -> Any:
+    result, operation_mask = _underpaint_face_with_mask(image, backend, feature_boxes)
+    operation_mask.close()
+    return result
 
 
 def _tighten_alpha(image: Any, *, feature: bool) -> Any:
@@ -219,17 +283,32 @@ def _tighten_alpha(image: Any, *, feature: bool) -> Any:
 
 
 def _subject_matte(image: Any) -> Any:
-    from PIL import ImageFilter
+    from PIL import ImageDraw, ImageFilter
 
     alpha = image.getchannel("A")
+    connected = alpha.point(lambda value: 255 if value >= SUBJECT_MATTE_ALPHA_THRESHOLD else 0)
     try:
-        eroded = alpha.filter(ImageFilter.MinFilter(SUBJECT_MATTE_EROSION_SIZE))
+        border = (
+            *((x, 0) for x in range(image.width)),
+            *((x, image.height - 1) for x in range(image.width)),
+            *((0, y) for y in range(1, image.height - 1)),
+            *((image.width - 1, y) for y in range(1, image.height - 1)),
+        )
+        for seed in border:
+            if connected.getpixel(seed) == 0:
+                ImageDraw.floodfill(connected, seed, 128, thresh=0)
+        exterior = connected.point(lambda value: 255 if value == 128 else 0)
+        try:
+            expanded_exterior = exterior.filter(ImageFilter.MaxFilter(SUBJECT_MATTE_EROSION_SIZE))
+        finally:
+            exterior.close()
     finally:
+        connected.close()
         alpha.close()
     try:
-        return eroded.point(lambda value: 255 if value >= SUBJECT_MATTE_ALPHA_THRESHOLD else 0)
+        return expanded_exterior.point(lambda value: 0 if value else 255)
     finally:
-        eroded.close()
+        expanded_exterior.close()
 
 
 def _apply_subject_matte(image: Any, matte: Any) -> Any:
@@ -284,7 +363,7 @@ def _feature_boxes(by_name: dict[str, dict[str, object]], run_dir: Path, backend
         artifact = by_name[semantic]["artifact"]
         if not isinstance(artifact, dict) or not isinstance(artifact.get("uri"), str):
             raise StageContractError("model motion draft feature artifact is invalid")
-        path = run_dir / str(artifact["uri"])
+        path = _contained_run_file(run_dir, str(artifact["uri"]))
         with backend.Image.open(path, formats=("PNG",)) as source:
             source.load()
             rgba = source.convert("RGBA")
@@ -367,7 +446,14 @@ def _crop_part(
     )
 
 
-def _prepare_parts(model_report: dict[str, object], backend: Any) -> list[MotionPart]:
+def _prepare_parts(
+    model_report: dict[str, object],
+    backend: Any,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> list[MotionPart]:
+    from PIL import ImageChops
+
     model = model_report.get("model")
     layers = model.get("layers") if isinstance(model, dict) else None
     if not isinstance(layers, list):
@@ -383,7 +469,7 @@ def _prepare_parts(model_report: dict[str, object], backend: Any) -> list[Motion
     if not isinstance(source_descriptor, dict) or not isinstance(source_descriptor.get("uri"), str):
         raise StageContractError("model motion draft source image is unavailable")
     run_dir = Path(str(model_report["_run_dir"]))
-    source_path = run_dir / str(source_descriptor["uri"])
+    source_path = _contained_run_file(run_dir, str(source_descriptor["uri"]))
     with backend.Image.open(source_path, formats=("PNG",)) as source:
         source.load()
         source_reference = source.convert("RGBA")
@@ -396,7 +482,7 @@ def _prepare_parts(model_report: dict[str, object], backend: Any) -> list[Motion
     if not isinstance(reconstruction_descriptor, dict) or not isinstance(reconstruction_descriptor.get("uri"), str):
         source_reference.close()
         raise StageContractError("model motion draft reconstruction image is unavailable")
-    reconstruction_path = run_dir / str(reconstruction_descriptor["uri"])
+    reconstruction_path = _contained_run_file(run_dir, str(reconstruction_descriptor["uri"]))
     with backend.Image.open(reconstruction_path, formats=("PNG",)) as reconstruction_source:
         reconstruction_source.load()
         reconstruction_reference = reconstruction_source.convert("RGBA")
@@ -418,15 +504,19 @@ def _prepare_parts(model_report: dict[str, object], backend: Any) -> list[Motion
             artifact = by_name[semantic]["artifact"]
             if not isinstance(artifact, dict) or not isinstance(artifact.get("uri"), str) or not isinstance(artifact.get("id"), str):
                 raise StageContractError("model motion draft source artifact is invalid")
-            path = Path(str(model_report["_run_dir"])) / str(artifact["uri"])
+            path = _contained_run_file(Path(str(model_report["_run_dir"])), str(artifact["uri"]))
             with backend.Image.open(path, formats=("PNG",)) as source:
                 source.load()
                 image = source.convert("RGBA")
+            underpaint_operation = None
             try:
                 if image.size != (CANVAS_SIZE, CANVAS_SIZE):
                     raise StageContractError("model motion draft source canvas is invalid")
                 if semantic == "face":
-                    render_source = _underpaint_face(image, backend, feature_boxes)
+                    if evidence is None:
+                        render_source = _underpaint_face(image, backend, feature_boxes)
+                    else:
+                        render_source, underpaint_operation = _underpaint_face_with_mask(image, backend, feature_boxes)
                 elif semantic in {"eyebrow", "nose", "mouth"}:
                     render_source = _source_feature_layer(source_reference, image)
                 else:
@@ -449,13 +539,50 @@ def _prepare_parts(model_report: dict[str, object], backend: Any) -> list[Motion
                                     candidate.image.close()
                         else:
                             candidates = (_crop_part(matted_source, semantic, str(artifact["id"]), draw_order),)
-                            parts.extend(part for part in candidates if part is not None)
+                            prepared = [part for part in candidates if part is not None]
+                            parts.extend(prepared)
+                            if semantic == "face" and evidence is not None and prepared:
+                                baseline_matted = _apply_subject_matte(image, subject_matte)
+                                try:
+                                    face_part = prepared[0]
+                                    baseline_crop = baseline_matted.crop(face_part.box)
+                                    try:
+                                        baseline_part = _tighten_alpha(baseline_crop, feature=False)
+                                    finally:
+                                        baseline_crop.close()
+                                finally:
+                                    baseline_matted.close()
+                                try:
+                                    affected = _rgba_difference_mask(face_part.image, baseline_part)
+                                finally:
+                                    baseline_part.close()
+                                try:
+                                    operation_crop = underpaint_operation.crop(face_part.box)
+                                    try:
+                                        unexplained = ImageChops.subtract(affected, operation_crop)
+                                        try:
+                                            if unexplained.getbbox() is not None:
+                                                raise StageContractError("model motion draft underpaint evidence does not match")
+                                        finally:
+                                            unexplained.close()
+                                    finally:
+                                        operation_crop.close()
+                                    canvas_mask = backend.Image.new("L", (CANVAS_SIZE, CANVAS_SIZE), 0)
+                                    canvas_mask.paste(affected, face_part.box[:2])
+                                    previous = evidence.get("underpaint_mask")
+                                    if previous is not None:
+                                        previous.close()
+                                    evidence["underpaint_mask"] = canvas_mask
+                                finally:
+                                    affected.close()
                     finally:
                         matted_source.close()
                 finally:
                     if render_source is not image:
                         render_source.close()
             finally:
+                if underpaint_operation is not None:
+                    underpaint_operation.close()
                 image.close()
         eye_draw_order = DRAW_ORDER.index("eyelash")
         eye_source_id = "+".join(eye_source_ids)
@@ -533,25 +660,13 @@ def _render(parts: list[MotionPart], parameters: dict[str, Fraction], backend: A
         for part in sorted(parts, key=lambda item: (item.draw_order, item.id))
     )
     try:
-        return render_rgba_layers(base, layers, backend, None, premultiply_alpha=True)
+        return render_rgba_layers(base, layers, backend, None, profile_id=RENDERER_PROFILE_ID)
     finally:
         base.close()
 
 
 def _is_neutral_frame(frame: Any) -> bool:
     return frame.parameter_fractions() == NEUTRAL_PARAMETERS
-
-
-def _clean_neutral_image(reconstruction_path: Path, backend: Any) -> Any:
-    with backend.Image.open(reconstruction_path, formats=("PNG",)) as source:
-        source.load()
-        reconstruction = source.convert("RGBA")
-    matte = _subject_matte(reconstruction)
-    try:
-        return _apply_subject_matte(reconstruction, matte)
-    finally:
-        matte.close()
-        reconstruction.close()
 
 
 def _geometry_record(part: MotionPart) -> dict[str, object]:
@@ -654,35 +769,66 @@ def _write_png(image: Any, path: Path, backend: Any) -> dict[str, object]:
     }
 
 
+def _png_bytes(image: Any, backend: Any) -> bytes:
+    stream = io.BytesIO()
+    pnginfo = backend.PngImagePlugin.PngInfo()
+    pnginfo.add(b"sRGB", b"\x00")
+    image.save(stream, format="PNG", optimize=False, compress_level=9, pnginfo=pnginfo, icc_profile=None, exif=b"")
+    data = stream.getvalue()
+    _verify_output_png(data, image.size)
+    return data
+
+
+def _rgb_mismatch_mask(difference: Any) -> Any:
+    from PIL import ImageChops
+
+    channels = difference.split()
+    red_green = ImageChops.lighter(channels[0], channels[1])
+    try:
+        return ImageChops.lighter(red_green, channels[2])
+    finally:
+        red_green.close()
+        for channel in channels:
+            channel.close()
+
+
+def _neutral_comparison_images(expected: Any, actual: Any) -> dict[str, object]:
+    from PIL import ImageChops, ImageStat
+
+    if expected.size != actual.size or expected.size != (CANVAS_SIZE, CANVAS_SIZE):
+        raise StageContractError("model motion draft neutral comparison canvas is invalid")
+    visible = expected.getchannel("A").point(lambda value: 255 if value > 15 else 0)
+    expected_rgb = expected.convert("RGB")
+    actual_rgb = actual.convert("RGB")
+    difference = ImageChops.difference(expected_rgb, actual_rgb)
+    mismatch_mask = _rgb_mismatch_mask(difference)
+    try:
+        visible_pixels = visible.histogram()[255]
+        if visible_pixels <= 0:
+            raise StageContractError("model motion draft neutral comparison has no visible pixels")
+        exact_pixels = mismatch_mask.histogram(mask=visible)[0]
+        channel_mae = ImageStat.Stat(difference, mask=visible).mean
+    finally:
+        mismatch_mask.close()
+        visible.close()
+        difference.close()
+        expected_rgb.close()
+        actual_rgb.close()
+    return {
+        "neutral_visible_pixel_count": visible_pixels,
+        "neutral_reconstruction_rgb_exact_ratio": round(exact_pixels / visible_pixels, 6),
+        "neutral_reconstruction_rgb_mae": round(sum(channel_mae) / len(channel_mae), 6),
+    }
+
+
 def _neutral_comparison(reconstruction_path: Path, neutral_path: Path) -> dict[str, object]:
-    from PIL import Image, ImageChops, ImageStat
+    from PIL import Image
 
     with Image.open(reconstruction_path, formats=("PNG",)) as expected_image, Image.open(neutral_path, formats=("PNG",)) as actual_image:
         expected = expected_image.convert("RGBA")
         actual = actual_image.convert("RGBA")
     try:
-        if expected.size != actual.size or expected.size != (CANVAS_SIZE, CANVAS_SIZE):
-            raise StageContractError("model motion draft neutral comparison canvas is invalid")
-        visible = expected.getchannel("A").point(lambda value: 255 if value > 15 else 0)
-        expected_rgb = expected.convert("RGB")
-        actual_rgb = actual.convert("RGB")
-        difference = ImageChops.difference(expected_rgb, actual_rgb)
-        try:
-            visible_pixels = visible.histogram()[255]
-            if visible_pixels <= 0:
-                raise StageContractError("model motion draft neutral comparison has no visible pixels")
-            exact_pixels = difference.convert("L").histogram(mask=visible)[0]
-            channel_mae = ImageStat.Stat(difference, mask=visible).mean
-        finally:
-            visible.close()
-            difference.close()
-            expected_rgb.close()
-            actual_rgb.close()
-        return {
-            "neutral_visible_pixel_count": visible_pixels,
-            "neutral_reconstruction_rgb_exact_ratio": round(exact_pixels / visible_pixels, 6),
-            "neutral_reconstruction_rgb_mae": round(sum(channel_mae) / len(channel_mae), 6),
-        }
+        return _neutral_comparison_images(expected, actual)
     finally:
         expected.close()
         actual.close()
@@ -701,12 +847,124 @@ def _sequence_record(sequence_config: Any, sequence: Any) -> dict[str, object]:
     }
 
 
+def recompute_model_motion_draft(
+    run_dir: Path,
+    model_report: dict[str, object],
+    backend: Any | None = None,
+) -> MotionRecomputation:
+    """Recompute motion evidence in memory without consulting published motion artifacts."""
+
+    run_dir = _contained_run_directory(run_dir)
+    _, sequence_config, sequence = _config()
+    backend = _load_pillow() if backend is None else backend
+    preparation_input = dict(model_report)
+    preparation_input["_run_dir"] = str(run_dir)
+    evidence: dict[str, Any] = {}
+    try:
+        parts = _prepare_parts(preparation_input, backend, evidence=evidence)
+    except Exception:
+        underpaint_mask = evidence.get("underpaint_mask")
+        if underpaint_mask is not None:
+            underpaint_mask.close()
+        raise
+    underpaint_mask = evidence.get("underpaint_mask")
+    if underpaint_mask is None:
+        for part in parts:
+            part.image.close()
+        raise StageContractError("model motion draft underpaint evidence is unavailable")
+    try:
+        layer_records: list[dict[str, object]] = []
+        layer_bytes: list[bytes] = []
+        total_bytes = 0
+        for part in parts:
+            name = f"{part.id}.png"
+            data = _png_bytes(part.image, backend)
+            total_bytes += len(data)
+            if total_bytes > MAX_OUTPUT_BYTES:
+                raise StageContractError("model motion draft recomputation exceeded its bound")
+            layer_bytes.append(data)
+            layer_records.append(_layer_record(part, {
+                "id": f"motion-{part.id}",
+                "uri": f"{OUTPUT_DIRECTORY}/{name}",
+                "media_type": "image/png",
+                "byte_length": len(data),
+                "sha256": sha256_bytes(data),
+                "width": part.image.width,
+                "height": part.image.height,
+                "mode": "RGBA",
+            }))
+        geometry = [_geometry_record(part) for part in parts]
+        parameters = _parameter_records()
+        bindings = _binding_records(layer_records)
+        frames: list[dict[str, object]] = []
+        frame_bytes: list[bytes] = []
+        for index, frame in enumerate(sequence.frames):
+            rendered = _render(parts, frame.parameter_fractions(), backend)
+            try:
+                data = _png_bytes(rendered, backend)
+            finally:
+                rendered.close()
+            total_bytes += len(data)
+            if total_bytes > MAX_OUTPUT_BYTES:
+                raise StageContractError("model motion draft recomputation exceeded its bound")
+            name = f"frame.{index:03d}.{frame.id}.png"
+            frame_bytes.append(data)
+            frames.append({
+                "index": index,
+                "id": frame.id,
+                "source": frame.source,
+                "parameters": frame.parameter_document(),
+                "artifact": {
+                    "id": f"motion-frame-{index:02d}",
+                    "uri": f"{OUTPUT_DIRECTORY}/{name}",
+                    "media_type": "image/png",
+                    "byte_length": len(data),
+                    "sha256": sha256_bytes(data),
+                    "width": CANVAS_SIZE,
+                    "height": CANVAS_SIZE,
+                    "mode": "RGBA",
+                },
+            })
+        model = model_report.get("model")
+        reconstruction = model.get("reconstruction") if isinstance(model, dict) else None
+        if not isinstance(reconstruction, dict) or not isinstance(reconstruction.get("uri"), str):
+            raise StageContractError("model motion draft reconstruction descriptor is invalid")
+        reconstruction_path = _contained_run_file(run_dir, str(reconstruction["uri"]))
+        with backend.Image.open(reconstruction_path, formats=("PNG",)) as reconstruction_image:
+            reconstruction_image.load()
+            expected_neutral = reconstruction_image.convert("RGBA")
+        with backend.Image.open(io.BytesIO(frame_bytes[0]), formats=("PNG",)) as neutral_image:
+            neutral_image.load()
+            actual_neutral = neutral_image.convert("RGBA")
+        try:
+            neutral_validation = _neutral_comparison_images(expected_neutral, actual_neutral)
+        finally:
+            expected_neutral.close()
+            actual_neutral.close()
+        return MotionRecomputation(
+            layers=layer_records,
+            layer_bytes=tuple(layer_bytes),
+            geometry=geometry,
+            parameters=parameters,
+            bindings=bindings,
+            sequence=_sequence_record(sequence_config, sequence),
+            frames=frames,
+            frame_bytes=tuple(frame_bytes),
+            validation={**_geometry_validation(parts, sequence), **neutral_validation},
+            underpaint_mask=underpaint_mask,
+        )
+    except Exception:
+        underpaint_mask.close()
+        raise
+    finally:
+        for part in parts:
+            part.image.close()
+
+
 def generate_model_motion_draft(run_dir: Path) -> tuple[Path, dict[str, object]]:
     from .model_workbench import load_model_workbench_report
 
-    run_dir = run_dir.resolve()
-    if not ID_RE.fullmatch(run_dir.name) or not run_dir.is_dir() or run_dir.is_symlink():
-        raise StageContractError("model motion draft run directory is invalid")
+    run_dir = _contained_run_directory(run_dir)
     target = run_dir / OUTPUT_DIRECTORY
     if target.exists() or target.is_symlink() or (run_dir / "workbench-report.json").is_symlink():
         raise StageContractError("model motion draft output already exists or is invalid")
@@ -748,13 +1006,10 @@ def generate_model_motion_draft(run_dir: Path) -> tuple[Path, dict[str, object]]
         reconstruction = model_report["model"]["reconstruction"]
         if not isinstance(reconstruction, dict) or not isinstance(reconstruction.get("uri"), str):
             raise StageContractError("model motion draft reconstruction descriptor is invalid")
-        reconstruction_path = run_dir / str(reconstruction["uri"])
+        reconstruction_path = _contained_run_file(run_dir, str(reconstruction["uri"]))
         frames: list[dict[str, object]] = []
         for index, frame in enumerate(sequence.frames):
-            if _is_neutral_frame(frame):
-                rendered = _clean_neutral_image(reconstruction_path, backend)
-            else:
-                rendered = _render(parts, frame.parameter_fractions(), backend)
+            rendered = _render(parts, frame.parameter_fractions(), backend)
             try:
                 name = f"frame.{index:03d}.{frame.id}.png"
                 path = temporary / name
@@ -778,7 +1033,7 @@ def generate_model_motion_draft(run_dir: Path) -> tuple[Path, dict[str, object]]
                     },
                 }
             )
-        comparison = _neutral_comparison(run_dir / str(reconstruction["uri"]), temporary / str(Path(frames[0]["artifact"]["uri"]).name))
+        comparison = _neutral_comparison(reconstruction_path, temporary / str(Path(frames[0]["artifact"]["uri"]).name))
         report = {
             "format": "oneclick2d.model-motion-draft-report",
             "format_version": "0.1.0",
@@ -789,7 +1044,7 @@ def generate_model_motion_draft(run_dir: Path) -> tuple[Path, dict[str, object]]
                 "algorithm_id": ALGORITHM_ID,
                 "config_sha256": CONFIG_SHA256,
                 "renderer_contract_id": RENDERER_CONTRACT_ID,
-                "renderer_profile_id": MOTION_RENDERER_PROFILE_ID,
+                "renderer_profile_id": RENDERER_PROFILE_ID,
             },
             "input": {
                 "model_result_sha256": sha256_file(run_dir / "model-result.json"),
@@ -844,12 +1099,21 @@ def load_model_motion_draft_report(
     expected_reconstruction_sha256: str,
     expected_reconstruction_uri: str,
 ) -> dict[str, object]:
+    run_dir = _contained_run_directory(run_dir)
     directory = run_dir / OUTPUT_DIRECTORY
     report_path = directory / REPORT_NAME
     if not directory.exists() and not report_path.exists():
         raise StageContractError("model motion draft is unavailable")
-    if directory.is_symlink() or not directory.is_dir() or report_path.is_symlink() or not report_path.is_file():
-        raise StageContractError("model motion draft directory is invalid")
+    try:
+        directory = contained_run_path(
+            run_dir.parent,
+            run_dir.name,
+            OUTPUT_DIRECTORY,
+            kind="directory",
+        )
+    except ValueError as exc:
+        raise StageContractError("model motion draft directory is invalid") from exc
+    report_path = _contained_run_file(run_dir, f"{OUTPUT_DIRECTORY}/{REPORT_NAME}")
     report = strict_load_json_bytes(read_bounded_file(report_path, MAX_REPORT_BYTES))
     required = {
         "format", "format_version", "scope", "run_id", "profile", "input", "layers", "geometry",
@@ -871,7 +1135,7 @@ def load_model_motion_draft_report(
         "algorithm_id": ALGORITHM_ID,
         "config_sha256": CONFIG_SHA256,
         "renderer_contract_id": RENDERER_CONTRACT_ID,
-        "renderer_profile_id": MOTION_RENDERER_PROFILE_ID,
+        "renderer_profile_id": RENDERER_PROFILE_ID,
     } or input_value != {
         "model_result_sha256": expected_model_result_sha256,
         "model_profile_id": MODEL_PROFILE_ID,
@@ -943,8 +1207,8 @@ def load_model_motion_draft_report(
     total = report_path.stat().st_size
     expected_files = {REPORT_NAME}
     for name, artifact, size in layer_artifacts:
-        path = directory / name
-        if path.is_symlink() or not path.is_file() or path.stat().st_size != artifact["byte_length"] or sha256_file(path) != artifact["sha256"]:
+        path = _contained_run_file(run_dir, f"{OUTPUT_DIRECTORY}/{name}")
+        if path.stat().st_size != artifact["byte_length"] or sha256_file(path) != artifact["sha256"]:
             raise StageContractError("model motion draft layer artifact identity does not match")
         data = read_bounded_file(path, MAX_FRAME_BYTES)
         _verify_output_png(data, size)
@@ -977,8 +1241,8 @@ def load_model_motion_draft_report(
             or SHA256_RE.fullmatch(str(artifact["sha256"])) is None
         ):
             raise StageContractError("model motion draft frame descriptor is invalid")
-        path = directory / name
-        if path.is_symlink() or not path.is_file() or path.stat().st_size != artifact["byte_length"] or sha256_file(path) != artifact["sha256"]:
+        path = _contained_run_file(run_dir, f"{OUTPUT_DIRECTORY}/{name}")
+        if path.stat().st_size != artifact["byte_length"] or sha256_file(path) != artifact["sha256"]:
             raise StageContractError("model motion draft frame identity does not match")
         data = read_bounded_file(path, MAX_FRAME_BYTES)
         _verify_output_png(data, (CANVAS_SIZE, CANVAS_SIZE))
@@ -993,22 +1257,21 @@ def load_model_motion_draft_report(
     }
     if len(neutral_hashes) != 1:
         raise StageContractError("model motion draft neutral frames do not match")
-    actual_files = {path.name for path in directory.iterdir() if path.is_file() and not path.is_symlink()}
-    if any(path.is_symlink() or not path.is_file() for path in directory.iterdir()) or actual_files != expected_files:
+    entries = list(directory.iterdir())
+    if {path.name for path in entries} != expected_files:
         raise StageContractError("model motion draft output inventory is incomplete")
-    reconstruction_relative = Path(expected_reconstruction_uri)
-    reconstruction_path = run_dir / reconstruction_relative
     try:
-        resolved_reconstruction = reconstruction_path.resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise StageContractError("model motion draft reconstruction path is invalid") from None
-    if (
-        reconstruction_relative.is_absolute()
-        or reconstruction_path.is_symlink()
-        or not reconstruction_path.is_file()
-        or run_dir.resolve() not in resolved_reconstruction.parents
-        or sha256_file(reconstruction_path) != expected_reconstruction_sha256
-    ):
+        for path in entries:
+            contained_run_path(
+                run_dir.parent,
+                run_dir.name,
+                f"{OUTPUT_DIRECTORY}/{path.name}",
+                kind="file",
+            )
+    except ValueError as exc:
+        raise StageContractError("model motion draft output inventory is incomplete") from exc
+    reconstruction_path = _contained_run_file(run_dir, expected_reconstruction_uri)
+    if sha256_file(reconstruction_path) != expected_reconstruction_sha256:
         raise StageContractError("model motion draft reconstruction identity does not match")
     validation_parts = [
         MotionPart(
@@ -1025,7 +1288,10 @@ def load_model_motion_draft_report(
     ]
     expected_validation = {
         **_geometry_validation(validation_parts, sequence),
-        **_neutral_comparison(reconstruction_path, directory / str(Path(frames[0]["artifact"]["uri"]).name)),
+        **_neutral_comparison(
+            reconstruction_path,
+            _contained_run_file(run_dir, str(frames[0]["artifact"]["uri"])),
+        ),
     }
     validation = report.get("validation")
     quality = report.get("quality")

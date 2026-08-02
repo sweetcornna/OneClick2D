@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-model-candidate/v0.1/preflight-report.schema.json",
+  "title": "OneClick2D Gate F Model Candidate Preflight Report v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "scope", "run_id", "local_status", "gate_f_status", "config_sha256", "artifacts", "arm_parity", "ready_for_activated_scoring", "activation_blockers", "claims"],
+  "properties": {
+    "format": {"const": "oneclick2d.model-candidate-preflight-report"},
+    "format_version": {"const": "0.1.0"},
+    "scope": {"const": "single-item-disposable-local-technical-preflight"},
+    "run_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"},
+    "local_status": {"const": "LOCAL_MODEL_CANDIDATE_PREFLIGHT_COMPLETED"},
+    "gate_f_status": {"const": "GATE_F_NOT_EVALUATED"},
+    "config_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_report", "comparator_report", "normalized_raster", "normalization_report"],
+      "properties": {
+        "candidate_report": {"$ref": "#/$defs/artifact"},
+        "comparator_report": {"$ref": "#/$defs/artifact"},
+        "normalized_raster": {"$ref": "#/$defs/artifact"},
+        "normalization_report": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "arm_parity": {"const": true},
+    "ready_for_activated_scoring": {"const": false},
+    "activation_blockers": {
+      "type": "array",
+      "const": ["GATE_0_NOT_APPROVED", "D_003_NOT_CLOSED", "D_009_NOT_CLOSED", "EXTERNAL_PSD_EDITOR_NOT_EVALUATED", "TWENTY_ITEM_PROTOCOL_NOT_RUN"],
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {"enum": ["GATE_0_NOT_APPROVED", "D_003_NOT_CLOSED", "D_009_NOT_CLOSED", "EXTERNAL_PSD_EDITOR_NOT_EVALUATED", "TWENTY_ITEM_PROTOCOL_NOT_RUN"]}
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["single_item_only", "review_ballots_present", "paired_outcomes_present", "f_usable_evaluated", "oc2d_produced", "moc3_produced", "gate_f_feasibility_proven"],
+      "properties": {
+        "single_item_only": {"const": true},
+        "review_ballots_present": {"const": false},
+        "paired_outcomes_present": {"const": false},
+        "f_usable_evaluated": {"const": false},
+        "oc2d_produced": {"const": false},
+        "moc3_produced": {"const": false},
+        "gate_f_feasibility_proven": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "uri", "media_type", "byte_length", "sha256"],
+      "properties": {
+        "id": {"type": "string"},
+        "uri": {"type": "string", "pattern": "^model-candidate-preflight/[a-z0-9_.-]+$"},
+        "media_type": {"type": "string"},
+        "byte_length": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    }
+  }
+}

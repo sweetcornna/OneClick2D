@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-simple-cutout-comparator/v0.3/config.schema.json",
+  "title": "OneClick2D Gate F Simple-Cutout Comparator Config v0.3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "profile_id", "required_pillow_version", "required_renderer_profile_id", "frame_sequence"],
+  "properties": {
+    "format": {"const": "oneclick2d.simple-cutout-comparator-config"},
+    "format_version": {"const": "0.3.0"},
+    "profile_id": {"const": "oc2d.spike.simple-cutout-comparator.v1"},
+    "required_pillow_version": {"const": "12.1.0"},
+    "required_renderer_profile_id": {"const": "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2"},
+    "frame_sequence": {"$ref": "../../gate-f-frame-sequence/v0.1/config.schema.json"}
+  }
+}

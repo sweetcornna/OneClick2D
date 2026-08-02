@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from spikes.gate_f_runner.contracts import StageContractError
 from spikes.gate_f_runner.frame_sequence import FRAME_COUNT, PARAMETER_ORDER
@@ -11,9 +13,13 @@ from spikes.gate_f_runner.gui_server import GuiState
 from spikes.gate_f_runner.model_motion_draft import (
     CANVAS_SIZE,
     DRAW_ORDER,
+    NEUTRAL_PARAMETERS,
     PART_PADDING,
     SUBJECT_MATTE_EROSION_SIZE,
+    MotionPart,
     _apply_subject_matte,
+    _neutral_comparison,
+    _render,
     _tighten_alpha,
     _source_feature_layer,
     _subject_matte,
@@ -21,7 +27,11 @@ from spikes.gate_f_runner.model_motion_draft import (
     generate_model_motion_draft,
     load_model_motion_draft_report,
 )
-from spikes.gate_f_runner.model_workbench import load_model_workbench_report
+from spikes.gate_f_runner.model_workbench import (
+    TRUSTED_MODEL_SOURCE_NAME,
+    _canonical_source_png_bytes,
+    load_model_workbench_report,
+)
 from spikes.gate_f_runner.model_worker import (
     LEGACY_DEPENDENCIES_SHA256,
     LEGACY_PROFILE_ID,
@@ -32,33 +42,51 @@ from spikes.gate_f_runner.raster import _load_pillow
 from tests.test_gate_f_model_workbench import refresh_model_inventory, write_model_fixture
 
 
-def write_sparse_motion_fixture(run_dir: Path) -> None:
+def _sparse_model_source(image_root: Path | None = None) -> Any:
     from PIL import Image, ImageDraw
+
+    reconstruction = Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0))
+    for index, semantic in enumerate(DRAW_ORDER):
+        with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0)) as layer:
+            draw = ImageDraw.Draw(layer)
+            color = (
+                35 + (index * 37) % 190,
+                30 + (index * 71) % 195,
+                45 + (index * 53) % 180,
+                255,
+            )
+            if semantic in {"eyewhite", "irides", "eyelash"}:
+                y = 330 + index * 9
+                draw.rectangle((330, y, 366, y + 22), fill=color)
+                draw.rectangle((914, y, 950, y + 22), fill=color)
+            else:
+                column = index % 6
+                row = index // 6
+                x = 90 + column * 176
+                y = 90 + row * 190
+                draw.rectangle((x, y, x + 54, y + 42), fill=color)
+            if image_root is not None:
+                layer.save(image_root / f"{semantic}.png", format="PNG")
+            reconstruction.alpha_composite(layer)
+    return reconstruction
+
+
+def persist_trusted_model_source(run_dir: Path, normalized_source: Any) -> bytes:
+    with tempfile.TemporaryDirectory() as directory:
+        normalized_path = Path(directory) / "normalized.png"
+        normalized_source.save(normalized_path, format="PNG")
+        trusted_data = _canonical_source_png_bytes(normalized_path)
+    (run_dir / TRUSTED_MODEL_SOURCE_NAME).write_bytes(trusted_data)
+    return trusted_data
+
+
+def write_sparse_motion_fixture(run_dir: Path) -> None:
+    with _sparse_model_source() as normalized_source:
+        persist_trusted_model_source(run_dir, normalized_source)
 
     result = write_model_fixture(run_dir, publish_result=False)
     image_root = run_dir / "model-output" / "input" / "input"
-    with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0)) as reconstruction:
-        for index, semantic in enumerate(DRAW_ORDER):
-            with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0)) as layer:
-                draw = ImageDraw.Draw(layer)
-                color = (
-                    35 + (index * 37) % 190,
-                    30 + (index * 71) % 195,
-                    45 + (index * 53) % 180,
-                    255,
-                )
-                if semantic in {"eyewhite", "irides", "eyelash"}:
-                    y = 330 + index * 9
-                    draw.rectangle((330, y, 366, y + 22), fill=color)
-                    draw.rectangle((914, y, 950, y + 22), fill=color)
-                else:
-                    column = index % 6
-                    row = index // 6
-                    x = 90 + column * 176
-                    y = 90 + row * 190
-                    draw.rectangle((x, y, x + 54, y + 42), fill=color)
-                layer.save(image_root / f"{semantic}.png", format="PNG")
-                reconstruction.alpha_composite(layer)
+    with _sparse_model_source(image_root) as reconstruction:
         reconstruction.save(image_root / "reconstruction.png", format="PNG")
         reconstruction.save(image_root / "src_img.png", format="PNG")
         reconstruction.save(image_root / "src_head.png", format="PNG")
@@ -75,25 +103,58 @@ def motion_loader_arguments(run_dir: Path) -> dict[str, str]:
     }
 
 
+@unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
 class GateFModelMotionDraftTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        import PIL
+
+        if PIL.__version__ != "12.1.0":
+            raise unittest.SkipTest("model motion draft requires locked Pillow 12.1.0")
+
     def test_subject_matte_erodes_only_the_outer_alpha_boundary(self) -> None:
         from PIL import Image, ImageDraw
 
-        with Image.new("RGBA", (11, 11), (20, 30, 40, 0)) as source:
-            ImageDraw.Draw(source).rectangle((2, 2, 8, 8), fill=(20, 30, 40, 255))
+        with Image.new("RGBA", (15, 15), (20, 30, 40, 0)) as source:
+            draw = ImageDraw.Draw(source)
+            draw.rectangle((2, 2, 12, 12), fill=(20, 30, 40, 255))
+            draw.rectangle((6, 6, 8, 8), fill=(20, 30, 40, 0))
             matte = _subject_matte(source)
             try:
                 self.assertLessEqual(set(matte.get_flattened_data()), {0, 255})
                 self.assertEqual(0, matte.getpixel((3, 3)))
                 self.assertEqual(255, matte.getpixel((4, 4)))
+                self.assertEqual(255, matte.getpixel((5, 7)))
+                self.assertEqual(255, matte.getpixel((9, 7)))
                 matted = _apply_subject_matte(source, matte)
             finally:
                 matte.close()
         try:
             self.assertEqual(0, matted.getpixel((3, 3))[3])
             self.assertEqual(255, matted.getpixel((4, 4))[3])
+            self.assertEqual(255, matted.getpixel((5, 7))[3])
+            self.assertEqual(0, matted.getpixel((7, 7))[3])
+            self.assertEqual(255, matted.getpixel((9, 7))[3])
         finally:
             matted.close()
+
+    def test_neutral_comparison_exact_ratio_detects_each_rgb_channel_delta(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reconstruction_path = root / "reconstruction.png"
+            neutral_path = root / "neutral.png"
+            with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (10, 20, 30, 255)) as reconstruction:
+                reconstruction.save(reconstruction_path, format="PNG")
+            for channel in range(3):
+                color = [10, 20, 30, 255]
+                color[channel] += 1
+                with self.subTest(channel=channel):
+                    with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), tuple(color)) as neutral:
+                        neutral.save(neutral_path, format="PNG")
+                    comparison = _neutral_comparison(reconstruction_path, neutral_path)
+                    self.assertEqual(0.0, comparison["neutral_reconstruction_rgb_exact_ratio"])
 
     def test_source_feature_layer_keeps_dark_source_detail_without_skin_fill(self) -> None:
         from PIL import Image
@@ -179,8 +240,8 @@ class GateFModelMotionDraftTests(unittest.TestCase):
             self.assertTrue(all(item["triangle_indices"] == [0, 1, 2, 0, 2, 3] for item in report["geometry"]))
             self.assertTrue(all(item["winding"] == "positive-screen-y-down" for item in report["geometry"]))
             self.assertEqual(len(report["layers"]) * FRAME_COUNT, report["validation"]["sample_count"])
-            self.assertEqual(1.0, report["validation"]["neutral_reconstruction_rgb_exact_ratio"])
-            self.assertEqual(0.0, report["validation"]["neutral_reconstruction_rgb_mae"])
+            self.assertLess(report["validation"]["neutral_reconstruction_rgb_exact_ratio"], 1.0)
+            self.assertGreater(report["validation"]["neutral_reconstruction_rgb_mae"], 0.0)
             self.assertEqual(1, len({report["frames"][index]["artifact"]["sha256"] for index in (0, 12, 36)}))
             self.assertEqual("head", next(item for item in report["layers"] if item["semantic"] == "back hair")["motion_group"])
             mouth_index = DRAW_ORDER.index("mouth")
@@ -211,12 +272,115 @@ class GateFModelMotionDraftTests(unittest.TestCase):
             self.assertTrue(frame.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertEqual("image/png", media_type)
             self.assertIsNone(filename)
+            reconstruction, reconstruction_media_type, reconstruction_filename = GuiState(root).workbench_artifact(
+                run_dir.name,
+                "model-reconstruction",
+            )
+            self.assertEqual("image/png", reconstruction_media_type)
+            self.assertIsNone(reconstruction_filename)
+            self.assertNotEqual(reconstruction, frame)
             layer, layer_media_type, layer_filename = GuiState(root).workbench_artifact(
                 run_dir.name, report["layers"][0]["artifact"]["id"]
             )
             self.assertTrue(layer.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertEqual("image/png", layer_media_type)
             self.assertIsNone(layer_filename)
+
+            from PIL import Image, ImageChops
+
+            published_parts: list[MotionPart] = []
+            try:
+                for item in report["layers"]:
+                    with Image.open(run_dir / item["artifact"]["uri"], formats=("PNG",)) as layer_image:
+                        layer_image.load()
+                        published_parts.append(
+                            MotionPart(
+                                id=item["id"],
+                                semantic=item["semantic"],
+                                side=item["side"],
+                                source_artifact_id=item["source_artifact_id"],
+                                box=tuple(item["box_ltrb"]),
+                                draw_order=item["draw_order"],
+                                motion_group=item["motion_group"],
+                                image=layer_image.convert("RGBA"),
+                            )
+                        )
+                expected_neutral = _render(published_parts, NEUTRAL_PARAMETERS, _load_pillow())
+                try:
+                    with Image.open(run_dir / report["frames"][0]["artifact"]["uri"], formats=("PNG",)) as stored:
+                        stored.load()
+                        with stored.convert("RGBA") as stored_rgba:
+                            with ImageChops.difference(expected_neutral, stored_rgba) as difference:
+                                self.assertIsNone(difference.getbbox())
+                finally:
+                    expected_neutral.close()
+            finally:
+                for part in published_parts:
+                    part.image.close()
+
+    def test_broken_layer_composition_lowers_neutral_fidelity(self) -> None:
+        from PIL import Image
+
+        backend = _load_pillow()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reconstruction_path = root / "reconstruction.png"
+            intact_path = root / "intact.png"
+            broken_path = root / "broken.png"
+            with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0)) as head_image, Image.new(
+                "RGBA",
+                (CANVAS_SIZE, CANVAS_SIZE),
+                (0, 0, 0, 0),
+            ) as static_image:
+                head_image.paste((20, 40, 60, 255), (100, 100, 160, 160))
+                static_image.paste((80, 100, 120, 255), (200, 200, 260, 260))
+                with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0)) as reconstruction:
+                    reconstruction.alpha_composite(head_image)
+                    reconstruction.alpha_composite(static_image)
+                    reconstruction.save(reconstruction_path, format="PNG")
+                parts = [
+                    MotionPart("layer.head", "face", "not-applicable", "head", (100, 100, 160, 160), 0, "head", head_image.crop((100, 100, 160, 160))),
+                    MotionPart("layer.static", "objects", "not-applicable", "static", (200, 200, 260, 260), 1, "static", static_image.crop((200, 200, 260, 260))),
+                ]
+            try:
+                intact = _render(parts, NEUTRAL_PARAMETERS, backend)
+                broken = _render(parts[:1], NEUTRAL_PARAMETERS, backend)
+                try:
+                    intact.save(intact_path, format="PNG")
+                    broken.save(broken_path, format="PNG")
+                finally:
+                    intact.close()
+                    broken.close()
+                intact_fidelity = _neutral_comparison(reconstruction_path, intact_path)
+                broken_fidelity = _neutral_comparison(reconstruction_path, broken_path)
+                self.assertEqual(1.0, intact_fidelity["neutral_reconstruction_rgb_exact_ratio"])
+                self.assertLess(
+                    broken_fidelity["neutral_reconstruction_rgb_exact_ratio"],
+                    intact_fidelity["neutral_reconstruction_rgb_exact_ratio"],
+                )
+            finally:
+                for part in parts:
+                    part.image.close()
+
+    def test_motion_rejects_model_with_source_visible_omissions(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.motion-coverage"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            reconstruction_path = run_dir / "model-output" / "input" / "input" / "reconstruction.png"
+            with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0)) as reconstruction:
+                reconstruction.putpixel((0, 0), (30, 90, 160, 220))
+                reconstruction.save(reconstruction_path, format="PNG")
+            refresh_model_inventory(run_dir, result, publish_result=True)
+
+            fidelity = load_model_workbench_report(run_dir)["quality"]["neutral_fidelity"]
+            self.assertEqual("review_required", fidelity["status"])
+            self.assertGreater(fidelity["source_visible_omission_count"], 1_000_000)
+            with self.assertRaisesRegex(StageContractError, "fidelity-passing active model profile"):
+                generate_model_motion_draft(run_dir)
+            self.assertFalse((run_dir / "motion-draft").exists())
 
     def test_loader_recomputes_evidence_and_rejects_frame_or_report_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -239,6 +403,41 @@ class GateFModelMotionDraftTests(unittest.TestCase):
             report_path.write_bytes(canonical_json_bytes(tampered))
             with self.assertRaisesRegex(StageContractError, "validation or claims"):
                 load_model_motion_draft_report(run_dir, **loader_arguments)
+
+    def test_loader_rejects_extra_and_nonregular_output_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.motion-inventory"
+            run_dir.mkdir()
+            write_sparse_motion_fixture(run_dir)
+            generate_model_motion_draft(run_dir)
+            loader_arguments = motion_loader_arguments(run_dir)
+            output = run_dir / "motion-draft"
+
+            extra = output / "extra.bin"
+            extra.write_bytes(b"extra")
+            with self.assertRaisesRegex(StageContractError, "inventory"):
+                load_model_motion_draft_report(run_dir, **loader_arguments)
+            extra.unlink()
+
+            nonregular = output / "extra-directory"
+            nonregular.mkdir()
+            with self.assertRaisesRegex(StageContractError, "inventory"):
+                load_model_motion_draft_report(run_dir, **loader_arguments)
+
+    def test_rejects_symlinked_run_directory_before_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            actual = root / "actual-run"
+            actual.mkdir()
+            write_sparse_motion_fixture(actual)
+            linked = root / "run.motion-link"
+            try:
+                linked.symlink_to(actual, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+
+            with self.assertRaisesRegex(StageContractError, "run directory"):
+                generate_model_motion_draft(linked)
 
     def test_rejects_legacy_model_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

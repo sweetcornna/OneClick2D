@@ -42,7 +42,7 @@ from .simple_cutout import (
     build_simple_cutout_registry,
 )
 
-FROZEN_CANDIDATE_CONFIG_SHA256 = "88c49f7c83d896dd9c486efc1cb746bae84bf4bbbf4a08a3c4257e4fa4e3f146"
+FROZEN_CANDIDATE_CONFIG_SHA256 = "0662abe2e066871ed394f009591a898998777e478a3ad32ad8434821202688af"
 REQUIRED_SLOTS = (
     "oc2d.character",
     "oc2d.face.base",
@@ -55,16 +55,21 @@ REQUIRED_SLOTS = (
 
 def _parse_config(data: bytes) -> GateFFrameSequenceConfig:
     value = strict_load_json_bytes(data)
+    if not isinstance(value, dict) or value.get("format") != "oneclick2d.candidate-baseline-config":
+        raise StageContractError("candidate config is invalid")
+    format_version = value.get("format_version")
+    if not isinstance(format_version, str):
+        raise StageContractError("candidate config is invalid")
+    if format_version != "0.2.0":
+        raise StageContractError("unsupported candidate config version")
     if sha256_bytes(canonical_json_bytes(value)) != FROZEN_CANDIDATE_CONFIG_SHA256:
         raise StageContractError("candidate config does not match frozen baseline profile")
-    keys = {"format", "format_version", "profile_id", "required_pillow_version", "frame_sequence"}
+    keys = {"format", "format_version", "profile_id", "required_pillow_version", "required_renderer_profile_id", "frame_sequence"}
     if (
-        not isinstance(value, dict)
-        or set(value) != keys
-        or value["format"] != "oneclick2d.candidate-baseline-config"
-        or value["format_version"] != "0.1.0"
+        set(value) != keys
         or value["profile_id"] != "oc2d.spike.candidate-baseline.fixed-regions.v1"
         or value["required_pillow_version"] != "12.1.0"
+        or value["required_renderer_profile_id"] != RENDERER_PROFILE_ID
     ):
         raise StageContractError("candidate config is invalid")
     return parse_gate_f_frame_sequence_config(value["frame_sequence"])
@@ -150,7 +155,7 @@ class CandidateBaselineAdapter:
     adapter_id = "candidate.baseline.pillow.v1"
     contract_id = "oc2d.spike.candidate-baseline.v1"
     stage_type = "oc2d.spike.candidate-baseline"
-    implementation_version = "0.1.0"
+    implementation_version = "0.2.0"
     execution_profile = "python-pillow-12.1.0-in-process-v1"
     execution_provider = "pillow-12.1.0"
     producer_kind = ProducerKind.DETERMINISTIC
@@ -201,7 +206,7 @@ class CandidateBaselineAdapter:
                 frame_reports.append({"index": index, "id": frame.id, "source": frame.source, "parameters": frame.parameter_document(), "artifact": {"name": name, "sha256": artifact.sha256, "byte_length": artifact.byte_length}})
             report = {
                 "format": "oneclick2d.candidate-baseline-report",
-                "format_version": "0.1.0",
+                "format_version": "0.2.0",
                 "scope": "disposable-gate-f-spike",
                 "adapter_id": self.adapter_id,
                 "adapter_version": self.implementation_version,
@@ -216,7 +221,7 @@ class CandidateBaselineAdapter:
                     for parameter_id, ranges in zip(PARAMETER_ORDER, ([-15, 15], [-10, 10], [0, 1], [0, 1], [0, 1]), strict=True)
                 ],
                 "sequence": {"profile_id": PROFILE_ID, "algorithm_id": ALGORITHM_ID, "config_sha256": sequence_config.canonical_sha256, "seed_u64": sequence.seed_u64, "sha256": sequence.sha256, "parameter_scale": PARAMETER_SCALE, "mandatory_frame_count": MANDATORY_FRAME_COUNT, "trajectory_frame_count": TRAJECTORY_FRAME_COUNT, "frame_count": FRAME_COUNT},
-                "rendering": {"contract_id": RENDERER_CONTRACT_ID, "profile_id": RENDERER_PROFILE_ID, "canvas": [width, height], "color_space": "srgb", "alpha_mode": "straight"},
+                "rendering": {"contract_id": RENDERER_CONTRACT_ID, "profile_id": RENDERER_PROFILE_ID, "canvas": [width, height], "color_space": "srgb", "input_alpha_mode": "straight", "filter_space": "premultiplied-srgb-u8"},
                 "frames": frame_reports,
                 "validation": {**validation, "source_pixels_modified_outside_generated_region": 0, "required_slot_presence": "6/6"},
                 "claims": {"model_used": False, "semantic_correctness_on_real_art_proven": False, "psd_produced": False, "gate_f_feasibility_proven": False},

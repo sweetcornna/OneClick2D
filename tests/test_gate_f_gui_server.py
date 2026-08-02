@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import importlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from http.client import HTTPConnection
 from pathlib import Path
+from unittest.mock import patch
 
+from spikes.gate_f_runner.contracts import StageContractError
 from spikes.gate_f_runner.gui_server import GuiServer, GuiState
 from spikes.gate_f_runner.model_workbench import load_model_workbench_report
 from spikes.gate_f_runner.runtime import canonical_json_bytes
@@ -16,7 +22,22 @@ from tests.test_gate_f_simple_cutout import purpose_created_asymmetric_png
 
 
 class GateFGuiServerTests(unittest.TestCase):
+    _PILLOW_TESTS = {
+        "test_api_runs_preflight_lists_bundle_and_serves_frames",
+        "test_direct_frame_tamper_hides_bundle_and_returns_no_bytes",
+        "test_explicit_model_workflow_never_claims_model_before_runner_success",
+        "test_gui_artifact_discovery_rejects_traversal_and_symlinked_runs",
+        "test_workbench_upload_reaches_completed_and_serves_allowlisted_outputs",
+    }
+
     def setUp(self) -> None:
+        if self._testMethodName in self._PILLOW_TESTS:
+            if importlib.util.find_spec("PIL") is None:
+                self.skipTest("Pillow is not installed")
+            import PIL
+
+            if PIL.__version__ != "12.1.0":
+                self.skipTest("GUI raster flows require locked Pillow 12.1.0")
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -99,6 +120,28 @@ class GateFGuiServerTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertEqual("image/png", headers["Content-Type"])
+        self.assertEqual("private, max-age=31536000, immutable", headers["Cache-Control"])
+        self.assertEqual("nosniff", headers["X-Content-Type-Options"])
+        self.assertEqual("same-origin", headers["Cross-Origin-Resource-Policy"])
+
+    def test_direct_frame_tamper_hides_bundle_and_returns_no_bytes(self) -> None:
+        payload = json.dumps({"run_id": "run.gui-tamper"}).encode()
+        status, body, _ = self.request("POST", "/api/preflight", payload)
+        self.assertEqual(201, status)
+        bundle_name = json.loads(body)["bundle"]
+        frame = self.root / bundle_name / "candidate-frame-000.png"
+        original = frame.read_bytes()
+        frame.write_bytes(original + b"tampered")
+
+        status, body, headers = self.request("GET", "/api/bundles")
+        self.assertEqual(200, status)
+        self.assertNotIn(bundle_name, {item["name"] for item in json.loads(body)["bundles"]})
+        status, body, headers = self.request("GET", f"/api/frame/{bundle_name}/candidate/0")
+        self.assertEqual(400, status)
+        self.assertEqual({"error": "LOCAL_EVIDENCE_UNAVAILABLE"}, json.loads(body))
+        self.assertNotIn(original, body)
+        self.assertEqual("no-store", headers["Cache-Control"])
+        self.assertEqual("nosniff", headers["X-Content-Type-Options"])
 
     def test_workbench_upload_reaches_completed_and_serves_allowlisted_outputs(self) -> None:
         source = purpose_created_asymmetric_png()
@@ -143,6 +186,17 @@ class GateFGuiServerTests(unittest.TestCase):
         discovered = GuiState(self.root).list_workbenches()
         self.assertEqual("run.gui-upload", discovered[0]["run_id"])
         self.assertFalse(discovered[0]["model_used"])
+
+    def test_submit_workbench_validates_run_id_before_state_or_path_lookup(self) -> None:
+        state = GuiState(self.root)
+        state.running = True
+        with patch.object(Path, "exists") as exists, patch("threading.Thread") as worker:
+            with self.assertRaisesRegex(StageContractError, "invalid run ID"):
+                state.submit_workbench("../bad", b"source", "image/png")
+        exists.assert_not_called()
+        worker.assert_not_called()
+        self.assertEqual({}, state._jobs)
+        self.assertIsNone(state._active_run_id)
 
     def test_workbench_rejects_wrong_type_origin_and_duplicate_id(self) -> None:
         source = purpose_created_asymmetric_png()
@@ -237,6 +291,50 @@ class GateFGuiServerTests(unittest.TestCase):
         self.assertEqual("completed", phases["RASTER_NORMALIZE"])
         self.assertEqual("failed", phases["PINNED_MODEL_INFERENCE"])
         self.assertEqual("unavailable", phases["MODEL_ARTIFACT_VALIDATE"])
+
+    def test_gui_artifact_discovery_rejects_traversal_and_symlinked_runs(self) -> None:
+        run_dir = self.root / "run.gui-contained"
+        run_dir.mkdir()
+        write_model_fixture(run_dir)
+        state = GuiState(self.root)
+        report = state.workbench_status(run_dir.name)
+        report["model"]["source"]["uri"] = "../outside.png"
+        with patch.object(state, "workbench_status", return_value=report):
+            with self.assertRaisesRegex(StageContractError, "workbench artifact"):
+                state.workbench_artifact(run_dir.name, "model-source")
+
+        linked = self.root / "run.gui-link"
+        try:
+            linked.symlink_to(run_dir, target_is_directory=True)
+        except OSError:
+            self.skipTest("directory symlinks are unavailable")
+        self.assertFalse(any(item.get("run_id") == linked.name for item in state.list_workbenches()))
+        with self.assertRaisesRegex(StageContractError, "run directory"):
+            state.workbench_status(linked.name)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junctions are unavailable")
+    def test_bundle_discovery_and_serving_reject_junctioned_bundle(self) -> None:
+        outside = self.root / "outside-bundle"
+        outside.mkdir()
+        junction = self.root / "run.gui-junction.bundle"
+        completed = subprocess.run(
+            f'mklink /J "{junction}" "{outside}"',
+            shell=True,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0 or not getattr(junction, "is_junction", lambda: False)():
+            self.skipTest("directory junctions are unavailable")
+        try:
+            state = GuiState(self.root)
+            self.assertFalse(any(item.get("name") == junction.name for item in state.list_bundles()))
+            with self.assertRaisesRegex(StageContractError, "unknown bundle"):
+                state.resolve_bundle(junction.name)
+            with self.assertRaisesRegex(StageContractError, "unknown bundle"):
+                state.frame_bytes(junction.name, "candidate", "0")
+        finally:
+            os.rmdir(junction)
 
     def test_invalid_routes_and_run_ids_are_bounded_json_errors(self) -> None:
         status, body, _ = self.request("POST", "/api/preflight", b'{"run_id":"../bad"}')

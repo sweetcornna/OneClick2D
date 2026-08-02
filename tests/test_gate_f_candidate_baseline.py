@@ -8,8 +8,8 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
-from spikes.gate_f_runner.candidate_baseline import build_gate_f_registry
-from spikes.gate_f_runner.contracts import StageStatus
+from spikes.gate_f_runner.candidate_baseline import _parse_config, build_gate_f_registry
+from spikes.gate_f_runner.contracts import StageContractError, StageStatus
 from spikes.gate_f_runner.runtime import canonical_json_bytes
 from tests.test_gate_f_simple_cutout import normalization_config_bytes, purpose_created_asymmetric_png
 
@@ -47,6 +47,26 @@ def make_fixture(root: Path, *, output_files: int = 43) -> tuple[Path, Path]:
     spec_path = root / "run-spec.json"
     spec_path.write_bytes(canonical_json_bytes(spec))
     return spec_path, source_path
+
+
+class CandidateBaselineConfigTests(unittest.TestCase):
+    def test_historical_v0_1_and_unknown_versions_are_explicitly_unsupported(self) -> None:
+        current = json.loads(CANDIDATE_CONFIG.read_bytes())
+        historical = json.loads(CANDIDATE_CONFIG.read_bytes())
+        historical["format_version"] = "0.1.0"
+        historical.pop("required_renderer_profile_id")
+        unknown = dict(current)
+        unknown["format_version"] = "9.9.9"
+        for label, value in (("historical-v0.1", historical), ("unknown", unknown)):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(StageContractError, "^unsupported candidate config version$"):
+                    _parse_config(canonical_json_bytes(value))
+
+    def test_modified_v0_2_config_is_a_frozen_profile_mismatch(self) -> None:
+        changed = json.loads(CANDIDATE_CONFIG.read_bytes())
+        changed["frame_sequence"]["seed_u64"] = "00000000000000000043"
+        with self.assertRaisesRegex(StageContractError, "^candidate config does not match frozen baseline profile$"):
+            _parse_config(canonical_json_bytes(changed))
 
 
 @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")

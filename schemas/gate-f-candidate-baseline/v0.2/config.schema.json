@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-candidate-baseline/v0.2/config.schema.json",
+  "title": "OneClick2D Gate F Deterministic Candidate Baseline Config v0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "profile_id", "required_pillow_version", "required_renderer_profile_id", "frame_sequence"],
+  "properties": {
+    "format": {"const": "oneclick2d.candidate-baseline-config"},
+    "format_version": {"const": "0.2.0"},
+    "profile_id": {"const": "oc2d.spike.candidate-baseline.fixed-regions.v1"},
+    "required_pillow_version": {"const": "12.1.0"},
+    "required_renderer_profile_id": {"const": "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2"},
+    "frame_sequence": {"$ref": "../../gate-f-frame-sequence/v0.1/config.schema.json"}
+  }
+}

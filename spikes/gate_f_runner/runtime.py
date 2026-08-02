@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -200,18 +201,223 @@ def derive_stage_seed(root_seed_u64: str, stage_id: str) -> str:
     return f"{int.from_bytes(digest.digest()[:8], 'big'):020d}"
 
 
+def _lexical_relative_parts(relative: str) -> tuple[str, ...]:
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or "\\" in relative
+        or relative.startswith("/")
+        or re.match(r"^[A-Za-z]:", relative)
+    ):
+        raise ValueError("unsafe relative path")
+    parts = relative.split("/")
+    if any(part in {"", ".", ".."} or ":" in part for part in parts):
+        raise ValueError("unsafe relative path")
+    return tuple(parts)
+
+
+def _is_reparse_point(path: Path, info: os.stat_result | None = None) -> bool:
+    details = info if info is not None else path.lstat()
+    if stat.S_ISLNK(details.st_mode):
+        return True
+    attributes = getattr(details, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _regular_directory_info(path: Path) -> os.stat_result:
+    info = path.lstat()
+    if _is_reparse_point(path, info) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("workspace path component is not a regular directory")
+    return info
+
+
+def _regular_file_info(path: Path) -> os.stat_result:
+    info = path.lstat()
+    if _is_reparse_point(path, info) or not stat.S_ISREG(info.st_mode):
+        raise ValueError("workspace path is not a regular file")
+    return info
+
+
+def _directory_identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _absolute_filesystem_path(path: Path) -> Path:
+    """Compose a path onto a genuinely absolute lexical filesystem anchor."""
+
+    path_text = os.fspath(path)
+    if re.match(r"^[A-Za-z]:(?![\\/])", path_text) or (path.drive and not path.root):
+        raise ValueError("drive-relative path does not have a safe filesystem anchor")
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    if (
+        not absolute.is_absolute()
+        or not absolute.root
+        or not absolute.anchor
+        or (absolute.drive and not absolute.root)
+        or any(part in {".", ".."} for part in absolute.parts[1:])
+    ):
+        raise ValueError("path does not have a safe filesystem anchor")
+    return absolute
+
+
+def prepare_regular_directory(
+    directory: Path,
+    *,
+    create: bool,
+    leaf_must_be_missing: bool = False,
+) -> Path:
+    """Validate lexical ancestors and optionally create each missing component safely."""
+
+    try:
+        absolute_directory = _absolute_filesystem_path(directory)
+        current = Path(absolute_directory.anchor)
+        expected: list[tuple[Path, tuple[int, int]]] = [
+            (current, _directory_identity(_regular_directory_info(current)))
+        ]
+        final_index = len(absolute_directory.parts) - 2
+        for index, part in enumerate(absolute_directory.parts[1:]):
+            parent_info = _regular_directory_info(current)
+            candidate = current / part
+            try:
+                candidate_info = _regular_directory_info(candidate)
+                if leaf_must_be_missing and index == final_index:
+                    raise FileExistsError(os.fspath(candidate))
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    candidate.mkdir()
+                except FileExistsError:
+                    candidate_info = _regular_directory_info(candidate)
+                    if leaf_must_be_missing and index == final_index:
+                        raise FileExistsError(os.fspath(candidate))
+                else:
+                    candidate_info = _regular_directory_info(candidate)
+                if _directory_identity(_regular_directory_info(current)) != _directory_identity(parent_info):
+                    raise ValueError("directory parent changed during creation")
+            current = candidate
+            expected.append((current, _directory_identity(candidate_info)))
+        for path, identity in expected:
+            if _directory_identity(_regular_directory_info(path)) != identity:
+                raise ValueError("directory path changed during validation")
+    except FileExistsError:
+        raise
+    except (FileNotFoundError, NotADirectoryError, RuntimeError, ValueError) as exc:
+        raise ValueError("directory path is not a regular directory") from exc
+    return absolute_directory
+
+
+def require_regular_workspace_root(workspace_root: Path, *, create: bool) -> Path:
+    """Return a workspace root whose full lexical path contains no reparse point."""
+
+    try:
+        return prepare_regular_directory(workspace_root, create=create)
+    except (FileExistsError, ValueError) as exc:
+        raise ValueError("workspace root is not a regular directory") from exc
+
+
+def contained_workspace_path(
+    workspace_root: Path,
+    relative: str,
+    *,
+    kind: str,
+) -> Path:
+    """Return an existing regular path contained beneath a lexical workspace root."""
+
+    if kind not in {"file", "directory"}:
+        raise ValueError("unsupported contained path kind")
+    parts = _lexical_relative_parts(relative)
+    try:
+        absolute_root = require_regular_workspace_root(workspace_root, create=False)
+        candidate = absolute_root.joinpath(*parts)
+        current = absolute_root
+        for index, part in enumerate(parts):
+            current = current / part
+            info = current.lstat()
+            if _is_reparse_point(current, info):
+                raise ValueError("contained path crosses a reparse point")
+            final = index == len(parts) - 1
+            if not final and not stat.S_ISDIR(info.st_mode):
+                raise ValueError("contained path parent is not a directory")
+            if final and (
+                (kind == "file" and not stat.S_ISREG(info.st_mode))
+                or (kind == "directory" and not stat.S_ISDIR(info.st_mode))
+            ):
+                raise ValueError("contained path has the wrong type")
+        resolved_root = absolute_root.resolve(strict=True)
+        resolved_candidate = candidate.resolve(strict=True)
+        resolved_candidate.relative_to(resolved_root)
+    except (FileNotFoundError, NotADirectoryError, RuntimeError, ValueError) as exc:
+        raise ValueError("path is not safely contained in the workspace") from exc
+    return candidate
+
+
+def contained_run_path(
+    workspace_root: Path,
+    run_id: str,
+    relative: str | None = None,
+    *,
+    kind: str,
+) -> Path:
+    """Return a regular run path after lexical run and workspace containment checks."""
+
+    if not ID_RE.fullmatch(run_id):
+        raise ValueError("invalid run id")
+    path = run_id if relative is None else f"{run_id}/{relative}"
+    return contained_workspace_path(workspace_root, path, kind=kind)
+
+
+def create_regular_run_file(workspace_root: Path, run_id: str, name: str) -> Path:
+    """Create or validate one idempotent regular file beneath a safe existing run."""
+
+    if not ID_RE.fullmatch(run_id):
+        raise ValueError("invalid run id")
+    parts = _lexical_relative_parts(name)
+    if len(parts) != 1:
+        raise ValueError("run file name must be a single safe component")
+    try:
+        run_dir = contained_run_path(workspace_root, run_id, kind="directory")
+        sentinel = run_dir / parts[0]
+        parent_identity = _directory_identity(_regular_directory_info(run_dir))
+        try:
+            existing_info = sentinel.lstat()
+        except FileNotFoundError:
+            existing_info = None
+        if existing_info is not None:
+            _regular_file_info(sentinel)
+        else:
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(sentinel, flags, 0o600)
+            except FileExistsError as exc:
+                raise ValueError("run file appeared during creation") from exc
+            try:
+                created_info = os.fstat(descriptor)
+                if not stat.S_ISREG(created_info.st_mode):
+                    raise ValueError("created workspace path is not a regular file")
+            finally:
+                os.close(descriptor)
+            _regular_file_info(sentinel)
+        if _directory_identity(_regular_directory_info(run_dir)) != parent_identity:
+            raise ValueError("run directory changed during file creation")
+        contained_run_path(workspace_root, run_id, parts[0], kind="file")
+    except (RuntimeError, ValueError) as exc:
+        raise ValueError("run file could not be created safely") from exc
+    return sentinel
+
+
 def resolve_safe_file(base: Path, relative: str) -> Path:
-    if not relative or "\\" in relative or relative.startswith("/") or re.match(r"^[A-Za-z]:", relative):
-        raise SpecValidationError("unsafe relative path")
-    parts = Path(relative).parts
-    if any(part in {"", ".", ".."} for part in parts):
-        raise SpecValidationError("unsafe relative path")
+    try:
+        parts = _lexical_relative_parts(relative)
+    except ValueError as exc:
+        raise SpecValidationError("unsafe relative path") from exc
     candidate = base.joinpath(*parts)
     if candidate.is_symlink():
         raise SpecValidationError("symlink inputs are prohibited")
     try:
         candidate.resolve(strict=True).relative_to(base.resolve(strict=True))
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise SpecValidationError("path escapes specification directory") from exc
     if not candidate.is_file():
         raise SpecValidationError("referenced path is not a file")
@@ -382,13 +588,18 @@ class RunWorkspace:
         self.cancel_sentinel = self.run_dir / "cancel.request"
 
     def create(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        if self.root.is_symlink():
-            raise SpecValidationError("workspace root cannot be a symlink")
         try:
-            self.run_dir.mkdir(exist_ok=False)
+            self.root = require_regular_workspace_root(self.root, create=True)
+            self.run_dir = self.root / self.run_id
+            self.cancel_sentinel = self.run_dir / "cancel.request"
+        except ValueError as exc:
+            raise SpecValidationError("workspace root must be a regular non-reparse directory") from exc
+        try:
+            prepare_regular_directory(self.run_dir, create=True, leaf_must_be_missing=True)
         except FileExistsError as exc:
             raise SpecValidationError("run id already exists") from exc
+        except ValueError as exc:
+            raise SpecValidationError("workspace root must be a regular non-reparse directory") from exc
         (self.run_dir / "spec" / "resolved-configs").mkdir(parents=True)
         (self.run_dir / "inputs").mkdir()
         (self.run_dir / "attempts").mkdir()

@@ -12,4 +12,6 @@
 
 The comparator copies four fixed patches from the normalized raster, applies the preregistered head/eye/mouth transforms, and renders 37 PNG frames containing only the required sRGB color declaration and no EXIF, ICC, text, comment, DPI, XMP, or other ancillary metadata. The standard-library shared sequence contains the 12 neutral/endpoint/combination frames plus a 25-frame fixed-point trajectory derived from explicit seed `00000000000000000042`; a future candidate must consume the same sequence digest.
 
+The current v0.3 config records the shared premultiplied-alpha renderer profile used by both arms; patch geometry, the 2 source-pixel feather, parameter rules, and sequence remain unchanged.
+
 Successful output proves only the fixed low-complexity comparator implementation under its locked local profile. It does not prove candidate renderer parity, semantic decomposition, hidden-region completion, PSD interoperability, Gate F feasibility, or production readiness.

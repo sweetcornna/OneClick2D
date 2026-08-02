@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import copy
 import importlib
 import json
+import re
 import struct
 import tempfile
 import unittest
 import zlib
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from spikes.gate_f_runner.contracts import ArtifactRef, StageContractError, StageStatus
@@ -30,6 +33,182 @@ from spikes.gate_f_runner.runtime import canonical_json_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPARATOR_CONFIG = ROOT / "examples" / "gate-f-simple-cutout-comparator" / "config.json"
+REPORT_SCHEMA = ROOT / "schemas" / "gate-f-simple-cutout-comparator" / "v0.3" / "report.schema.json"
+
+
+def _json_schema_type_matches(value: object, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    raise AssertionError("unsupported test schema type")
+
+
+def _validate_json_schema(value: object, schema: dict[str, Any], root: dict[str, Any]) -> None:
+    reference = schema.get("$ref")
+    if reference is not None:
+        prefix = "#/$defs/"
+        if not isinstance(reference, str) or not reference.startswith(prefix):
+            raise AssertionError("unsupported test schema reference")
+        _validate_json_schema(value, root["$defs"][reference[len(prefix) :]], root)
+        return
+    expected_type = schema.get("type")
+    if expected_type is not None and (not isinstance(expected_type, str) or not _json_schema_type_matches(value, expected_type)):
+        raise AssertionError("schema type mismatch")
+    if "const" in schema and value != schema["const"]:
+        raise AssertionError("schema const mismatch")
+    if "enum" in schema and value not in schema["enum"]:
+        raise AssertionError("schema enum mismatch")
+    if isinstance(value, str) and "pattern" in schema and re.search(schema["pattern"], value) is None:
+        raise AssertionError("schema pattern mismatch")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            raise AssertionError("schema minimum mismatch")
+        if "maximum" in schema and value > schema["maximum"]:
+            raise AssertionError("schema maximum mismatch")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", len(value)):
+            raise AssertionError("schema array length mismatch")
+        if schema.get("uniqueItems") and len({json.dumps(item, sort_keys=True) for item in value}) != len(value):
+            raise AssertionError("schema unique-items mismatch")
+        prefix_items = schema.get("prefixItems", [])
+        if not isinstance(prefix_items, list):
+            raise AssertionError("unsupported test prefix-items schema")
+        for item, item_schema in zip(value, prefix_items):
+            _validate_json_schema(item, item_schema, root)
+        if schema.get("items") is False and len(value) > len(prefix_items):
+            raise AssertionError("schema additional-item mismatch")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for item in value:
+                _validate_json_schema(item, item_schema, root)
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if not set(required) <= set(value):
+            raise AssertionError("schema required-field mismatch")
+        if schema.get("additionalProperties") is False and not set(value) <= set(properties):
+            raise AssertionError("schema additional-property mismatch")
+        for key, item_schema in properties.items():
+            if key in value:
+                _validate_json_schema(value[key], item_schema, root)
+
+
+def assert_v0_3_report_schema(value: object) -> None:
+    schema = json.loads(REPORT_SCHEMA.read_text(encoding="utf-8"))
+    _validate_json_schema(value, schema, schema)
+
+
+def v0_3_report_schema_fixture() -> dict[str, object]:
+    digest = "0" * 64
+    parameters = {"head.yaw": 0, "head.pitch": 0, "eye.left.open": 1, "eye.right.open": 1, "mouth.open": 0}
+    return {
+        "format": "oneclick2d.simple-cutout-comparator-report",
+        "format_version": "0.3.0",
+        "scope": "disposable-gate-f-spike",
+        "adapter_id": "simple-cutout.comparator.pillow.v1",
+        "adapter_version": "0.3.0",
+        "contract_id": "oc2d.spike.simple-cutout-comparator.v1",
+        "config_sha256": digest,
+        "stage_seed_u64": "00000000000000000042",
+        "randomness_used": True,
+        "sequence_scope": "mandatory-neutral-endpoint-combination-seeded-trajectory",
+        "sequence": {
+            "profile_id": "oc2d.spike.gate-f-frame-sequence.v1",
+            "algorithm_id": "sha256-waypoint-linear-fixed-point.v1",
+            "config_sha256": digest,
+            "seed_u64": "00000000000000000042",
+            "sha256": digest,
+            "parameter_scale": 1000,
+            "mandatory_frame_count": 12,
+            "trajectory_frame_count": 25,
+            "frame_count": 37,
+        },
+        "input": {
+            "normalized_raster_sha256": digest,
+            "normalization_report_sha256": digest,
+            "normalization_finding_codes": [],
+            "width": 101,
+            "height": 103,
+            "mode": "RGBA",
+            "bit_depth": 8,
+            "color_space": "srgb",
+            "alpha_mode": "straight",
+        },
+        "parameters": {"order": ["head.yaw", "head.pitch", "eye.left.open", "eye.right.open", "mouth.open"], "side_convention": "character-anatomical"},
+        "patches": [
+            {
+                "id": "head",
+                "parameter_id": None,
+                "character_side": "not-applicable",
+                "percent_xyxy": [20, 5, 80, 60],
+                "pixel_box_ltrb": [20, 5, 81, 62],
+                "pivot_source_pixel_x2": [101, 67],
+            },
+            {
+                "id": "eye.screen-left",
+                "parameter_id": "eye.right.open",
+                "character_side": "right",
+                "percent_xyxy": [27, 25, 47, 40],
+                "pixel_box_ltrb": [27, 25, 48, 42],
+                "pivot_source_pixel_x2": [75, 67],
+            },
+            {
+                "id": "eye.screen-right",
+                "parameter_id": "eye.left.open",
+                "character_side": "left",
+                "percent_xyxy": [53, 25, 73, 40],
+                "pixel_box_ltrb": [53, 25, 74, 42],
+                "pivot_source_pixel_x2": [127, 67],
+            },
+            {
+                "id": "mouth",
+                "parameter_id": "mouth.open",
+                "character_side": "not-applicable",
+                "percent_xyxy": [40, 42, 60, 56],
+                "pixel_box_ltrb": [40, 43, 61, 58],
+                "pivot_source_pixel_x2": [101, 101],
+            },
+        ],
+        "rendering": {
+            "contract_id": "oc2d.spike.pillow-rgba-renderer.v1",
+            "profile_id": "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2",
+            "coordinate_origin": "top-left",
+            "rectangle_quantization": "floor-min-ceil-max-half-open",
+            "pivot": "resolved-box-center",
+            "feather": {"source_pixels": 2, "coverage": "linear-inward-min-edge-distance"},
+            "head_transform_inheritance": "locally-active-child-patches",
+            "identity_patch_policy": "skip-inactive-local-controls",
+            "composition_order": ["head", "eye.screen-left", "eye.screen-right", "mouth"],
+            "resampling": "pillow-bilinear",
+            "rgba_filter_space": "premultiplied-srgb-u8",
+            "alpha_composite": "porter-duff-source-over",
+            "outside_rgba": [0, 0, 0, 0],
+            "base_erased": False,
+            "png": {"compress_level": 9, "optimize": False, "metadata": "srgb-only"},
+        },
+        "frames": [
+            {
+                "index": index,
+                "id": f"frame.{index:03d}",
+                "source": "mandatory" if index < 12 else "seeded-trajectory",
+                "parameters": dict(parameters),
+                "artifact": {"name": f"frame.{index:03d}.png", "role": "simple_cutout_frame", "media_type": "image/png", "sha256": digest, "byte_length": 1},
+            }
+            for index in range(37)
+        ],
+        "runtime": {"pillow": "12.1.0"},
+        "finding_codes": [],
+        "claims": {"semantic_decomposition_performed": False, "hidden_region_completion_performed": False, "psd_produced": False, "gate_f_feasibility_proven": False},
+    }
 
 
 def png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
@@ -132,7 +311,78 @@ def make_fixture(root: Path, source: bytes, *, comparator_output_files: int = 38
 
 
 class SimpleCutoutPureTests(unittest.TestCase):
-    def test_example_is_the_only_accepted_v0_2_config(self) -> None:
+    def test_v0_3_report_schema_preserves_the_v0_2_contract(self) -> None:
+        fixture = v0_3_report_schema_fixture()
+        assert_v0_3_report_schema(fixture)
+
+        reordered_ids = copy.deepcopy(fixture)
+        reordered_ids["parameters"]["order"][0], reordered_ids["parameters"]["order"][1] = reordered_ids["parameters"]["order"][1], reordered_ids["parameters"]["order"][0]
+        malformed_parameters = copy.deepcopy(fixture)
+        del malformed_parameters["frames"][0]["parameters"]["head.yaw"]
+        missing_digest = copy.deepcopy(fixture)
+        del missing_digest["frames"][0]["artifact"]["sha256"]
+        out_of_range_stage_seed = copy.deepcopy(fixture)
+        out_of_range_stage_seed["stage_seed_u64"] = "18446744073709551616"
+        out_of_range_sequence_seed = copy.deepcopy(fixture)
+        out_of_range_sequence_seed["sequence"]["seed_u64"] = "18446744073709551616"
+        mutations = {
+            "reordered-parameter-ids": reordered_ids,
+            "malformed-frame-parameters": malformed_parameters,
+            "missing-artifact-digest": missing_digest,
+            "out-of-range-stage-seed": out_of_range_stage_seed,
+            "out-of-range-sequence-seed": out_of_range_sequence_seed,
+        }
+        for field, value in (("mandatory_frame_count", 11), ("trajectory_frame_count", 24), ("frame_count", 36)):
+            wrong_count = copy.deepcopy(fixture)
+            wrong_count["sequence"][field] = value
+            mutations[f"wrong-{field}"] = wrong_count
+        wrong_frame_cardinality = copy.deepcopy(fixture)
+        wrong_frame_cardinality["frames"].pop()
+        mutations["wrong-frame-cardinality"] = wrong_frame_cardinality
+        for section in ("sequence", "input", "parameters", "runtime", "claims"):
+            extra = copy.deepcopy(fixture)
+            extra[section]["unexpected"] = True
+            mutations[f"extra-{section}-field"] = extra
+        extra_frame = copy.deepcopy(fixture)
+        extra_frame["frames"][0]["unexpected"] = True
+        mutations["extra-frame-field"] = extra_frame
+        extra_artifact = copy.deepcopy(fixture)
+        extra_artifact["frames"][0]["artifact"]["unexpected"] = True
+        mutations["extra-artifact-field"] = extra_artifact
+        empty_patches = copy.deepcopy(fixture)
+        empty_patches["patches"] = []
+        mutations["empty-patches-array"] = empty_patches
+        empty_patch = copy.deepcopy(fixture)
+        empty_patch["patches"][0] = {}
+        mutations["empty-patch-object"] = empty_patch
+        extra_patch = copy.deepcopy(fixture)
+        extra_patch["patches"][0]["unexpected"] = True
+        mutations["extra-patch-field"] = extra_patch
+        extra_rendering = copy.deepcopy(fixture)
+        extra_rendering["rendering"]["unexpected"] = True
+        mutations["extra-rendering-field"] = extra_rendering
+        extra_feather = copy.deepcopy(fixture)
+        extra_feather["rendering"]["feather"]["unexpected"] = True
+        mutations["extra-feather-field"] = extra_feather
+        extra_png = copy.deepcopy(fixture)
+        extra_png["rendering"]["png"]["unexpected"] = True
+        mutations["extra-png-field"] = extra_png
+        path_patch_property = copy.deepcopy(fixture)
+        path_patch_property["patches"][0]["pixel_box_ltrb"] = "../../source.png"
+        mutations["path-valued-patch-property"] = path_patch_property
+        path_frame_name = copy.deepcopy(fixture)
+        path_frame_name["frames"][0]["artifact"]["name"] = "../../frame.png"
+        mutations["path-valued-frame-filename"] = path_frame_name
+        for field in fixture["rendering"]:
+            missing_rendering_field = copy.deepcopy(fixture)
+            del missing_rendering_field["rendering"][field]
+            mutations[f"missing-rendering-{field}"] = missing_rendering_field
+        for label, changed in mutations.items():
+            with self.subTest(label=label):
+                with self.assertRaises(AssertionError):
+                    assert_v0_3_report_schema(changed)
+
+    def test_example_is_the_only_accepted_v0_3_config(self) -> None:
         data = COMPARATOR_CONFIG.read_bytes()
         sequence_config = _parse_frozen_config(data)
         self.assertEqual(FROZEN_COMPARATOR_CONFIG_SHA256, sha256(canonical_json_bytes(json.loads(data))).hexdigest())
@@ -141,10 +391,12 @@ class SimpleCutoutPureTests(unittest.TestCase):
         changed["frame_sequence"]["seed_u64"] = "00000000000000000043"
         with self.assertRaisesRegex(Exception, "frozen v1 profile"):
             _parse_frozen_config(canonical_json_bytes(changed))
-        changed = json.loads(data)
-        changed["format_version"] = "0.1.0"
-        with self.assertRaisesRegex(Exception, "unsupported simple-cutout config version"):
-            _parse_frozen_config(canonical_json_bytes(changed))
+        for historical_version in ("0.2.0", "0.1.0"):
+            changed = json.loads(data)
+            changed["format_version"] = historical_version
+            with self.subTest(historical_version=historical_version):
+                with self.assertRaisesRegex(StageContractError, "^unsupported simple-cutout config version$"):
+                    _parse_frozen_config(canonical_json_bytes(changed))
 
     def test_odd_canvas_boxes_use_outward_half_open_rounding(self) -> None:
         patches = _build_patches(101, 103)
@@ -298,6 +550,7 @@ class SimpleCutoutAdapterTests(unittest.TestCase):
             _verify_output_png((first_path.parent / artifact["uri"]).read_bytes(), (101, 103))
 
         report = json.loads((first_path.parent / first["result"]["uri"]).read_text(encoding="utf-8"))
+        assert_v0_3_report_schema(report)
         self.assertEqual(normalized["sha256"], report["input"]["normalized_raster_sha256"])
         mandatory_ids = [frame_id for frame_id, _ in MANDATORY_TICKS]
         self.assertEqual(mandatory_ids, [frame["id"] for frame in report["frames"][:12]])

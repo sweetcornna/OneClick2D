@@ -41,6 +41,7 @@
 - [`.oc2d` 包一致性规范](PACKAGE_CONFORMANCE.md)
 - [PSD 导出配置](PSD_EXPORT_PROFILE.md)
 - [模型动态研究初稿](MODEL_MOTION_DRAFT.md)
+- [单项模型 Candidate 技术预检](../examples/gate-f-model-candidate/README.md)
 
 ## 质量、工程与治理
 

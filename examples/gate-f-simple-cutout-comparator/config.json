@@ -1,8 +1,9 @@
 {
   "format": "oneclick2d.simple-cutout-comparator-config",
-  "format_version": "0.2.0",
+  "format_version": "0.3.0",
   "profile_id": "oc2d.spike.simple-cutout-comparator.v1",
   "required_pillow_version": "12.1.0",
+  "required_renderer_profile_id": "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2",
   "frame_sequence": {
     "format": "oneclick2d.gate-f-frame-sequence-config",
     "format_version": "0.1.0",
