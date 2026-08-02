@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import io
 import struct
+import threading
 import warnings
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 from .contracts import (
     Determinism,
@@ -63,6 +65,20 @@ class PillowBackend:
     PngImagePlugin: Any
     UnidentifiedImageError: type[BaseException]
     version: str
+
+
+_MAX_IMAGE_PIXELS_LOCK = threading.Lock()
+
+
+@contextmanager
+def _temporary_max_image_pixels(backend: PillowBackend, maximum: int) -> Iterator[None]:
+    with _MAX_IMAGE_PIXELS_LOCK:
+        old_max_pixels = backend.Image.MAX_IMAGE_PIXELS
+        try:
+            backend.Image.MAX_IMAGE_PIXELS = maximum
+            yield
+        finally:
+            backend.Image.MAX_IMAGE_PIXELS = old_max_pixels
 
 
 def _positive_int(value: Any, minimum: int, maximum: int, label: str) -> int:
@@ -468,73 +484,77 @@ class PillowRasterNormalizeAdapter:
             source_data = source.path.read_bytes()
             backend = _load_pillow()
             facts = _preflight(source_data, source.media_type, config)
-            old_max_pixels = backend.Image.MAX_IMAGE_PIXELS
             old_truncated = backend.ImageFile.LOAD_TRUNCATED_IMAGES
             try:
-                backend.Image.MAX_IMAGE_PIXELS = config.max_pixels
-                backend.ImageFile.LOAD_TRUNCATED_IMAGES = False
-                with warnings.catch_warnings():
-                    warnings.simplefilter("error", backend.Image.DecompressionBombWarning)
-                    with backend.Image.open(io.BytesIO(source_data), formats=("PNG", "JPEG")) as verify_image:
-                        _image_identity(verify_image, facts, source.media_type, config)
-                        verify_image.verify()
-                    with backend.Image.open(io.BytesIO(source_data), formats=("PNG", "JPEG")) as decoded:
-                        _image_identity(decoded, facts, source.media_type, config)
-                        orientation = _orientation(decoded)
-                        icc_profile = _icc_bytes(decoded, config)
-                        decoded.load()
-                        transformed = backend.ImageOps.exif_transpose(decoded)
-                        try:
-                            _check_dimensions(transformed.size, config)
-                            normalized, color_policy, finding_codes = _color_convert(transformed, icc_profile, facts, backend, config)
-                        finally:
-                            transformed.close()
-                        try:
-                            context.cancellation.checkpoint()
-                            png_artifact = _write_normalized_png(normalized, context, config, backend)
-                            report = {
-                                "format": "oneclick2d.raster-normalization-report",
-                                "format_version": "0.1.0",
-                                "scope": "disposable-gate-f-spike",
-                                "adapter_id": self.adapter_id,
-                                "adapter_version": self.implementation_version,
-                                "contract_id": self.contract_id,
-                                "input": {
-                                    "format": facts.format,
-                                    "media_type": source.media_type,
-                                    "width": decoded.width,
-                                    "height": decoded.height,
-                                    "mode": decoded.mode,
-                                    "bit_depth": facts.bit_depth,
-                                    "frame_count": 1,
-                                },
-                                "orientation": {"value": orientation, "applied": orientation != 1},
-                                "color_policy": color_policy,
-                                "output": {
-                                    "width": normalized.width,
-                                    "height": normalized.height,
-                                    "mode": "RGBA",
-                                    "bit_depth": 8,
-                                    "color_space": "srgb",
-                                    "alpha_mode": "straight",
-                                    "sha256": png_artifact.sha256,
-                                    "byte_length": png_artifact.byte_length,
-                                },
-                                "metadata_removed": ["exif", "icc", "text", "comment", "dpi", "xmp"],
-                                "finding_codes": list(finding_codes),
-                                "runtime": {"pillow": backend.version},
-                                "gate_f_feasibility_proven": False,
-                            }
-                            report_artifact = context.sink.write_bytes(
-                                "normalization-report.json",
-                                canonical_json_bytes(report),
-                                role="raster_normalization_report",
-                                media_type="application/vnd.oneclick2d.raster-normalization-report+json",
-                            )
-                        finally:
-                            normalized.close()
+                with _temporary_max_image_pixels(backend, config.max_pixels):
+                    backend.ImageFile.LOAD_TRUNCATED_IMAGES = False
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", backend.Image.DecompressionBombWarning)
+                        with backend.Image.open(io.BytesIO(source_data), formats=("PNG", "JPEG")) as verify_image:
+                            _image_identity(verify_image, facts, source.media_type, config)
+                            verify_image.verify()
+                        with backend.Image.open(io.BytesIO(source_data), formats=("PNG", "JPEG")) as decoded:
+                            _image_identity(decoded, facts, source.media_type, config)
+                            orientation = _orientation(decoded)
+                            icc_profile = _icc_bytes(decoded, config)
+                            decoded.load()
+                            transformed = backend.ImageOps.exif_transpose(decoded)
+                            try:
+                                _check_dimensions(transformed.size, config)
+                                normalized, color_policy, finding_codes = _color_convert(
+                                    transformed,
+                                    icc_profile,
+                                    facts,
+                                    backend,
+                                    config,
+                                )
+                            finally:
+                                transformed.close()
+                            try:
+                                context.cancellation.checkpoint()
+                                png_artifact = _write_normalized_png(normalized, context, config, backend)
+                                report = {
+                                    "format": "oneclick2d.raster-normalization-report",
+                                    "format_version": "0.1.0",
+                                    "scope": "disposable-gate-f-spike",
+                                    "adapter_id": self.adapter_id,
+                                    "adapter_version": self.implementation_version,
+                                    "contract_id": self.contract_id,
+                                    "input": {
+                                        "format": facts.format,
+                                        "media_type": source.media_type,
+                                        "width": decoded.width,
+                                        "height": decoded.height,
+                                        "mode": decoded.mode,
+                                        "bit_depth": facts.bit_depth,
+                                        "frame_count": 1,
+                                    },
+                                    "orientation": {"value": orientation, "applied": orientation != 1},
+                                    "color_policy": color_policy,
+                                    "output": {
+                                        "width": normalized.width,
+                                        "height": normalized.height,
+                                        "mode": "RGBA",
+                                        "bit_depth": 8,
+                                        "color_space": "srgb",
+                                        "alpha_mode": "straight",
+                                        "sha256": png_artifact.sha256,
+                                        "byte_length": png_artifact.byte_length,
+                                    },
+                                    "metadata_removed": ["exif", "icc", "text", "comment", "dpi", "xmp"],
+                                    "finding_codes": list(finding_codes),
+                                    "runtime": {"pillow": backend.version},
+                                    "gate_f_feasibility_proven": False,
+                                }
+                                report_artifact = context.sink.write_bytes(
+                                    "normalization-report.json",
+                                    canonical_json_bytes(report),
+                                    role="raster_normalization_report",
+                                    media_type="application/vnd.oneclick2d.raster-normalization-report+json",
+                                )
+                            finally:
+                                normalized.close()
             finally:
-                backend.Image.MAX_IMAGE_PIXELS = old_max_pixels
                 backend.ImageFile.LOAD_TRUNCATED_IMAGES = old_truncated
         except MemoryError as exc:
             raise ResourceLimitExceeded("raster memory limit exceeded") from exc

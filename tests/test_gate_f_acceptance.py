@@ -236,18 +236,75 @@ class GateFAcceptanceBundleTests(unittest.TestCase):
             self.assertEqual([index], [call.args[0] for call in read_file.call_args_list])
             digest.assert_not_called()
 
-    def test_aggregate_byte_budget_is_rejected_before_artifact_reads(self) -> None:
+    def test_aggregate_byte_budget_depth_defense_when_trusted_descriptors_are_unavailable(self) -> None:
+        # Echoing the tampered index from the patched trusted-descriptor lookup simulates
+        # that earlier trust check being unavailable; production rejects on that check.
         with tempfile.TemporaryDirectory() as directory:
             index, _ = run_local_preflight(Path(directory), "run.aggregate-byte-budget")
             value = json.loads(index.read_text(encoding="utf-8"))
             value["entries"][0]["byte_length"] = MAX_BUNDLE_ARTIFACT_BYTES
+            index.write_bytes(canonical_json_bytes(value))
+            matching_descriptors = {
+                entry["name"]: (entry["sha256"], entry["byte_length"])
+                for entry in value["entries"]
+            }
+
+            with (
+                patch(
+                    "spikes.gate_f_runner.acceptance._trusted_evidence_descriptors",
+                    return_value=matching_descriptors,
+                ),
+                patch(
+                    "spikes.gate_f_runner.acceptance.read_bounded_file",
+                    wraps=runtime_read_bounded_file,
+                ) as read_file,
+            ):
+                with self.assertRaisesRegex(StageContractError, "bundle aggregate byte budget exceeded"):
+                    verify_bundle(index.parent)
+            self.assertEqual([index], [call.args[0] for call in read_file.call_args_list])
+
+    def test_overlong_trusted_length_mismatch_is_rejected_before_artifact_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index, _ = run_local_preflight(Path(directory), "run.overlong-trusted-length")
+            value = json.loads(index.read_text(encoding="utf-8"))
+            value["entries"][0]["byte_length"] = 64 * 1024 * 1024
             index.write_bytes(canonical_json_bytes(value))
 
             with patch(
                 "spikes.gate_f_runner.acceptance.read_bounded_file",
                 wraps=runtime_read_bounded_file,
             ) as read_file:
-                with self.assertRaisesRegex(StageContractError, "bundle aggregate byte budget exceeded"):
+                with self.assertRaisesRegex(StageContractError, "trusted purpose-created evidence"):
+                    verify_bundle(index.parent)
+            self.assertEqual([index], [call.args[0] for call in read_file.call_args_list])
+
+    def test_correct_digest_wrong_length_is_rejected_before_artifact_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index, _ = run_local_preflight(Path(directory), "run.correct-digest-wrong-length")
+            value = json.loads(index.read_text(encoding="utf-8"))
+            value["entries"][0]["byte_length"] += 1
+            index.write_bytes(canonical_json_bytes(value))
+
+            with patch(
+                "spikes.gate_f_runner.acceptance.read_bounded_file",
+                wraps=runtime_read_bounded_file,
+            ) as read_file:
+                with self.assertRaisesRegex(StageContractError, "trusted purpose-created evidence"):
+                    verify_bundle(index.parent)
+            self.assertEqual([index], [call.args[0] for call in read_file.call_args_list])
+
+    def test_correct_length_wrong_digest_is_rejected_before_artifact_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index, _ = run_local_preflight(Path(directory), "run.correct-length-wrong-digest")
+            value = json.loads(index.read_text(encoding="utf-8"))
+            value["entries"][0]["sha256"] = "0" * 64
+            index.write_bytes(canonical_json_bytes(value))
+
+            with patch(
+                "spikes.gate_f_runner.acceptance.read_bounded_file",
+                wraps=runtime_read_bounded_file,
+            ) as read_file:
+                with self.assertRaisesRegex(StageContractError, "trusted purpose-created evidence"):
                     verify_bundle(index.parent)
             self.assertEqual([index], [call.args[0] for call in read_file.call_args_list])
 

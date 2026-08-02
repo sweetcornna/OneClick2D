@@ -78,7 +78,7 @@
 
 - **F1** [高] `model` CLI 无法产出可激活运行：workbench 信任硬化后校验要求 `trusted-model-source.png`，但 CLI 路径从不生成它——文档化的 `model → motion → model-candidate` 工作流必然在第一步后中断。→ CLI 复用 upload 路径的受信源生成逻辑，在 worker 调用前发布该文件，补端到端命令链回归。
   （本次交接已独立确认：`run_normalized_model_workbench()` 在调用 worker 前 `_publish_bytes(trusted_source_path, ...)`，GUI 与 CLI 共用该函数——见 `spikes/gate_f_runner/model_workbench.py:1309`。）
-- **F2** [中] acceptance 验证有 37.5 GiB 内存耗尽面：重算比对前把全部产物读进内存，74 个 PNG 每个可声明 512 MiB 且无总量上限，违反仓库“资源超限严格拒绝”契约。→ 先校验声明长度总量预算，再逐产物**流式**比对（峰值内存恒定），字节相等后才解码。
+- **F2** [中] acceptance 验证有 37.5 GiB 内存耗尽面：重算比对前把全部产物读进内存，74 个 PNG 每个可声明 512 MiB 且无总量上限，违反仓库“资源超限严格拒绝”契约。→ 先校验声明长度总量预算，再逐产物顺序比对，字节相等后才解码。（2026-08-02 复核更正措辞：实现是**产物粒度顺序处理**——单产物整体读入、受预算约束，并非块级流式/峰值恒定；同日 N2 修复又将每个描述符与可信重算证据的 (sha256, byte_length) 在任何产物 I/O 之前精确核对。）
 - **F3** [中] profile 声明过期 entrypoint digest：v4 入口文件被改后，worker 用双常量同时接受新旧 digest，报告发布的仍是旧 digest，provenance 失真。→ profile 记录实际执行文件的 digest、纳入 device-policy 文件、移除双 digest 例外；profile 名保持 `source-preserve.v4` 不变（算法语义未变，只是 attestation 归真）。
   （本次交接已独立确认：profile 中 `entrypoint.sha256` 与 `entrypoint.device_policy.sha256` 与磁盘文件实算 sha256 完全一致，且各只有一个值。）
 
@@ -192,3 +192,24 @@ python -m spikes.gate_f_runner verify-model-candidate --run-id run.local-model
 ## 8. 一句话给接手人
 
 先备份 `.claude/workflow-runs/whtdulpa9/journal.jsonl`，再跑 P0-1 完整套件和 P0-2 最终确认性复核；这两项收口后，这一轮审计修复才算真正结束，然后才轮到 P1-3 的提交分包。
+
+## 9. 收口附录（2026-08-02，UTC）
+
+> 本节由接手会话（macOS）追加。复核对象：HEAD `ee953de`；§3 所述“未提交”状态已过时——全部修复已作为 `450344c` 提交并经 PR #2 合并进 `main`，审计 journal 随之入库（P1-3、P2-2 闭环）。
+
+- **P0-1 ✅**：完整 Pillow 套件在 macOS（Python 3.14.6 + Pillow 12.1.0 venv）**211 项 OK（16 项平台性跳过，0 失败 0 错误）**；文档 lint、smoke、preflight 均通过。独立第二次复跑（纯净 `git archive` 副本）同样全绿；无 Pillow 系统解释器下 213 项 OK（123 跳过）。注意：macOS 需将 `TMPDIR` 指向已解析路径（`/var`→`/private/var` 符号链接会被工作区硬化校验拒绝，属平台环境因素，非缺陷）；Pillow 按版本安装，锁定文件的 Windows wheel hash 在本机不适用。
+- **P0-2 ✅**：两路独立对抗复核（Codex 与 Opus 5）+ 主模型抽验，一致判定 **F1 / F2 / F3 全部 CONFIRMED 闭环**。同时抓出 **8 条新发现（1 中 7 低）**，含一条与 F2 措辞相关：§2.2 “逐产物流式比对（峰值内存恒定）”与实现不符，实际是**产物粒度顺序处理**（单产物整体读入，受声明总量预算约束）。完整证据与新发现清单见 `.claude/review-records/2026-08-02-final-confirmatory-review/`。
+- **P1-1 ✅**：全仓库 64-hex 常量 28 项逐条核对，workbench/motion/candidate 生产代码、schema、examples、tests 中无内嵌旧 entrypoint digest 期望；旧 digest `aedb9e25…` 全库零命中。
+- **P1-2 仍开放**：需要 Windows + WSL2 GPU 真机，macOS 无法执行。
+- **P2-1**：四个杂散文件在干净检出中不存在；若原 Windows 工作副本仍在，需在彼处清理。
+- **下一轮待办**：新发现 N1–N8 的分诊与修复（N1 中危：attestation 摘要未入报告、`postprocess_algorithm` 缺 `.psd-postcorrect.v1` 后缀；N6 涉及 profile_id 是否升版，属决策项）。本轮审计修复循环至此收口。（后续状态见 §10。）
+
+## 10. N 系列修复轮（2026-08-02，UTC，同日追加）
+
+§9 所列新发现已完成一轮“分包修复 → 双路对抗复核 → 收尾修复”，全部改动仍在工作树**未提交**：
+
+- **已闭环**：N1（attestation 摘要经 worker 返回、workbench 独立重验后并入报告；`postprocess_algorithm` 发布带 `.psd-postcorrect.v1` 后缀的实际执行标识；历史 v2/v3 不变且携带 attestation 会被拒）、N2（描述符与可信重算证据的 (sha256, byte_length) 在任何产物 I/O 前精确核对）、N3（`_png_facts` 解码前验画布 + 钉版加载 + 炸弹护栏）、N4（active v4 阈值改读 profile 的 31，附 `alpha_threshold_source`；v2/v3 保持 15 并标注 legacy 来源）、N5（新增 `.gitattributes` 保护全部 raw-digest 绑定路径）、N8（`purpose_created.py` 共享模块，生产者/验证器字节级等价实证）。双路复核确认闭环（记录：`.claude/review-records/2026-08-02-fix-round-adversarial-review/`）。
+- **复核抓出的第二批缺陷已收尾修复**：D1/Codex#2（报告 `format_version` 升 0.4.0，loader 对历史 v2/v3 的 0.3.0 持久化报告按投影严格验证，v4 的 0.3.0 与未知版本给专门版本错误，附静态字节 fixture 回归）、Codex#3（attestation 组件设备必须精确等于顶层 `execution_device`，覆盖裸 `cuda`/`cuda:1`/混合设备负例）、D2（reason_codes 列表去别名）、D3（`MAX_IMAGE_PIXELS` 三处改共用进程级锁上下文管理器，含线程交错回归）、D4/D5（死参数与危险默认参数清除）、D6（纵深预算测试改名标注）、D7（本文档 §2.2 F2 措辞更正）、D8（non-active 文案）。
+- **显式不修、留决策**：attestation 与 run/source/产物的强绑定（Codex#1，中危——当前 attestation 是可逐字复现的自述，非执行期密码学证明；修复需改 digest 绑定的入口脚本并连带 profile digest 更新）与 N6（profile_id 升 v5 还是加 `attestation_revision`，涉及本仓库 CLAUDE.md 固定 profile 名与仅存于原 Windows 工作副本的历史 v2/v3 profile 内容归档）。二者同属 digest 链决策域，建议一并定夺。N7 按复核结论接受现状（loopback-only，实测 ~30 ms/帧）。
+- **注意**：`format_version` 升 0.4.0 意味着本轮之前发布的 **active v4** workbench 报告需重新生成（历史 v2/v3 报告仍按 0.3.0 投影可验，符合仓库承诺）；目前尚无真实 GPU 运行产物，实际影响为零。
+- 验收状态：完整套件（Pillow venv）全绿、`preflight` `LOCAL_TECHNICAL_PREFLIGHT_PASS` + `GATE_F_NOT_EVALUATED`、文档 lint 通过（以主模型宿主机独立复跑为准；Codex 沙箱内 `test_gate_f_gui_server` 的 12 项 socket bind 失败为沙箱限制，宿主复跑通过）。P1-2（Windows + WSL2 GPU 真机链路）仍开放。

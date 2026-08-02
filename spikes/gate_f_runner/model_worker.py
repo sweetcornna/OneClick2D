@@ -11,7 +11,9 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 from .contracts import StageContractError
 from .model_psd_validator import ModelPsdStructure, validate_model_psd
@@ -33,6 +35,11 @@ LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256 = "6b625faa99022f6edfa5faba97b23054331b
 SOURCE_PRESERVE_ALGORITHM_ID = "source-visible-rgb-by-depth-mask-clean.v2"
 NF4_MARIGOLD_DEVICE_POLICY_ID = "see-through.v4.nf4-marigold-bounded-offload.v1"
 PSD_PIXEL_PROJECTION_ALGORITHM_ID = f"{SOURCE_PRESERVE_ALGORITHM_ID}.psd-postcorrect.v1"
+ENTRYPOINT_COMPONENT_DISPOSITIONS = (
+    ("vae", "sequential-cpu-offload"),
+    ("unet", "resident-quantized"),
+    ("text_encoder", "cached-and-released"),
+)
 MAX_MODEL_STDIO_BYTES = 2 * 1024 * 1024
 MAX_MODEL_RESULT_BYTES = 512 * 1024 * 1024
 MAX_MODEL_PNG_BYTES = 64 * 1024 * 1024
@@ -439,7 +446,12 @@ def _verify_wsl_models(profile: dict[str, object]) -> None:
                 raise StageContractError("model weight size mismatch")
 
 
-def _invoke_wsl(source: Path, output: Path, profile: dict[str, object], timeout_seconds: int) -> subprocess.CompletedProcess[bytes]:
+def _invoke_wsl(
+    source: Path,
+    output: Path,
+    profile: dict[str, object],
+    timeout_seconds: int,
+) -> tuple[subprocess.CompletedProcess[bytes], Mapping[str, object] | None]:
     distribution, root, python = _runtime(profile)
     _verify_wsl_models(profile)
     inference = _validated_inference(profile)
@@ -510,12 +522,115 @@ def _invoke_wsl(source: Path, output: Path, profile: dict[str, object], timeout_
         output_limit=MAX_MODEL_STDIO_BYTES,
         env=os.environ.copy(),
     )
-    if completed.returncode == 0:
-        _consume_entrypoint_attestation(attestation_path)
-    return completed
+    attestation = _consume_entrypoint_attestation(attestation_path) if completed.returncode == 0 else None
+    return completed, attestation
 
 
-def _consume_entrypoint_attestation(path: Path) -> None:
+def _validated_entrypoint_attestation_summary(value: object) -> Mapping[str, object]:
+    if (
+        not isinstance(value, Mapping)
+        or set(value)
+        != {
+            "policy_id",
+            "requested_cpu_offload",
+            "execution_device",
+            "components",
+            "psd_pixel_projection_algorithm_id",
+            "psd_projection_verified",
+        }
+        or value.get("policy_id") != NF4_MARIGOLD_DEVICE_POLICY_ID
+        or value.get("requested_cpu_offload") is not True
+        or value.get("execution_device") != "cuda:0"
+        or value.get("psd_pixel_projection_algorithm_id") != PSD_PIXEL_PROJECTION_ALGORITHM_ID
+        or value.get("psd_projection_verified") is not True
+    ):
+        raise StageContractError("model entrypoint attestation is invalid")
+    execution_device = str(value["execution_device"])
+    components = value.get("components")
+    expected_dispositions = dict(ENTRYPOINT_COMPONENT_DISPOSITIONS)
+    if not isinstance(components, Mapping) or set(components) != set(expected_dispositions):
+        raise StageContractError("model entrypoint device attestation is invalid")
+    frozen_components: dict[str, Mapping[str, object]] = {}
+    for name, disposition in ENTRYPOINT_COMPONENT_DISPOSITIONS:
+        component = components.get(name)
+        if not isinstance(component, Mapping) or set(component) != {
+            "storage_devices",
+            "execution_hook_devices",
+            "upstream_cuda_move_suppressed",
+            "disposition",
+        }:
+            raise StageContractError("model entrypoint device attestation is invalid")
+        storage = component.get("storage_devices")
+        hooks = component.get("execution_hook_devices")
+        if (
+            not isinstance(storage, (list, tuple))
+            or not isinstance(hooks, (list, tuple))
+            or any(not isinstance(device, str) or not device for device in (*storage, *hooks))
+            or list(storage) != sorted(set(storage))
+            or list(hooks) != sorted(set(hooks))
+            or not isinstance(component.get("upstream_cuda_move_suppressed"), bool)
+            or component.get("disposition") != disposition
+        ):
+            raise StageContractError("model entrypoint device attestation is invalid")
+        frozen_components[name] = MappingProxyType(
+            {
+                "storage_devices": tuple(storage),
+                "execution_hook_devices": tuple(hooks),
+                "upstream_cuda_move_suppressed": component["upstream_cuda_move_suppressed"],
+                "disposition": disposition,
+            }
+        )
+    vae = frozen_components["vae"]
+    unet = frozen_components["unet"]
+    text_encoder = frozen_components["text_encoder"]
+    is_cuda = lambda device: device == "cuda" or device.startswith("cuda:")
+    if (
+        vae["upstream_cuda_move_suppressed"] is not True
+        or any(is_cuda(device) for device in vae["storage_devices"])
+        or not vae["execution_hook_devices"]
+        or not all(device == execution_device for device in vae["execution_hook_devices"])
+        or unet["upstream_cuda_move_suppressed"] is not True
+        or not unet["storage_devices"]
+        or not all(device == execution_device for device in unet["storage_devices"])
+        or any(is_cuda(device) for device in text_encoder["storage_devices"])
+    ):
+        raise StageContractError("model entrypoint device attestation is invalid")
+    return MappingProxyType(
+        {
+            "policy_id": NF4_MARIGOLD_DEVICE_POLICY_ID,
+            "requested_cpu_offload": True,
+            "execution_device": execution_device,
+            "components": MappingProxyType(frozen_components),
+            "psd_pixel_projection_algorithm_id": PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+            "psd_projection_verified": True,
+        }
+    )
+
+
+def _entrypoint_attestation_dict(value: object) -> dict[str, object]:
+    summary = _validated_entrypoint_attestation_summary(value)
+    components = summary["components"]
+    if not isinstance(components, Mapping):
+        raise StageContractError("model entrypoint device attestation is invalid")
+    return {
+        "policy_id": summary["policy_id"],
+        "requested_cpu_offload": summary["requested_cpu_offload"],
+        "execution_device": summary["execution_device"],
+        "components": {
+            name: {
+                "storage_devices": list(components[name]["storage_devices"]),
+                "execution_hook_devices": list(components[name]["execution_hook_devices"]),
+                "upstream_cuda_move_suppressed": components[name]["upstream_cuda_move_suppressed"],
+                "disposition": components[name]["disposition"],
+            }
+            for name, _ in ENTRYPOINT_COMPONENT_DISPOSITIONS
+        },
+        "psd_pixel_projection_algorithm_id": summary["psd_pixel_projection_algorithm_id"],
+        "psd_projection_verified": summary["psd_projection_verified"],
+    }
+
+
+def _consume_entrypoint_attestation(path: Path) -> Mapping[str, object]:
     try:
         if path.is_symlink() or not path.is_file():
             raise StageContractError("model entrypoint attestation is missing")
@@ -545,50 +660,16 @@ def _consume_entrypoint_attestation(path: Path) -> None:
             or value.get("psd_projection_verified") is not True
         ):
             raise StageContractError("model entrypoint attestation is invalid")
-        components = value.get("components")
-        if not isinstance(components, dict) or set(components) != {"vae", "unet", "text_encoder"}:
-            raise StageContractError("model entrypoint device attestation is invalid")
-        expected_dispositions = {
-            "vae": "sequential-cpu-offload",
-            "unet": "resident-quantized",
-            "text_encoder": "cached-and-released",
-        }
-        for name, disposition in expected_dispositions.items():
-            component = components.get(name)
-            if not isinstance(component, dict) or set(component) != {
-                "storage_devices",
-                "execution_hook_devices",
-                "upstream_cuda_move_suppressed",
-                "disposition",
-            }:
-                raise StageContractError("model entrypoint device attestation is invalid")
-            storage = component.get("storage_devices")
-            hooks = component.get("execution_hook_devices")
-            if (
-                not isinstance(storage, list)
-                or not isinstance(hooks, list)
-                or any(not isinstance(device, str) or not device for device in (*storage, *hooks))
-                or storage != sorted(set(storage))
-                or hooks != sorted(set(hooks))
-                or not isinstance(component.get("upstream_cuda_move_suppressed"), bool)
-                or component.get("disposition") != disposition
-            ):
-                raise StageContractError("model entrypoint device attestation is invalid")
-        vae = components["vae"]
-        unet = components["unet"]
-        text_encoder = components["text_encoder"]
-        is_cuda = lambda device: device == "cuda" or device.startswith("cuda:")
-        if (
-            vae["upstream_cuda_move_suppressed"] is not True
-            or any(is_cuda(device) for device in vae["storage_devices"])
-            or not vae["execution_hook_devices"]
-            or not all(is_cuda(device) for device in vae["execution_hook_devices"])
-            or unet["upstream_cuda_move_suppressed"] is not True
-            or not unet["storage_devices"]
-            or not all(is_cuda(device) for device in unet["storage_devices"])
-            or any(is_cuda(device) for device in text_encoder["storage_devices"])
-        ):
-            raise StageContractError("model entrypoint device attestation is invalid")
+        return _validated_entrypoint_attestation_summary(
+            {
+                "policy_id": value["policy_id"],
+                "requested_cpu_offload": value["requested_cpu_offload"],
+                "execution_device": value["execution_device"],
+                "components": value["components"],
+                "psd_pixel_projection_algorithm_id": value["psd_pixel_projection_algorithm_id"],
+                "psd_projection_verified": value["psd_projection_verified"],
+            }
+        )
     finally:
         path.unlink(missing_ok=True)
 
@@ -863,7 +944,7 @@ def run_model_worker(source: Path, output_root: Path, *, timeout_seconds: int = 
     local_source = Path(tempfile.mkdtemp(prefix="source-", dir=output_root.parent)) / "input.png"
     local_source.write_bytes(source_bytes)
     try:
-        completed = _invoke_wsl(local_source, output_root, profile, timeout_seconds)
+        completed, entrypoint_attestation = _invoke_wsl(local_source, output_root, profile, timeout_seconds)
     finally:
         shutil.rmtree(local_source.parent, ignore_errors=True)
     if completed.returncode != 0:
@@ -895,6 +976,7 @@ def run_model_worker(source: Path, output_root: Path, *, timeout_seconds: int = 
         "model_used": True,
         "oc2d_produced": False,
         "gate_f_status": "GATE_F_NOT_EVALUATED",
+        "entrypoint_attestation": _entrypoint_attestation_dict(entrypoint_attestation),
         "files": files,
         "psd": indexed["input/input.psd"],
     }

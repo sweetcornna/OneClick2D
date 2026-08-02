@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
 import io
 import os
 import shutil
 import stat
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Callable
 
@@ -31,13 +33,16 @@ from .model_worker import (
     LEGACY_UPSTREAM_COMMIT,
     MAX_MODEL_RESULT_BYTES,
     MODEL_PART_NAMES,
+    PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     PROFILE_ID,
-    SOURCE_PRESERVE_ALGORITHM_ID,
+    _entrypoint_attestation_dict,
     _load_profile,
     _validated_entrypoint,
+    _validated_inference,
+    _validated_postprocess,
     run_model_worker,
 )
-from .raster import _load_pillow, build_raster_registry
+from .raster import _load_pillow, _temporary_max_image_pixels, build_raster_registry
 from .runner import PipelineRunner
 from .runtime import (
     ID_RE,
@@ -64,6 +69,8 @@ IMPORTED_MODEL_PHASES = tuple(phase for phase in MODEL_PHASES if phase != "RASTE
 MODEL_TIMEOUT_SECONDS = 3600
 MODEL_RESULT_NAME = "model-result.json"
 WORKBENCH_REPORT_NAME = "workbench-report.json"
+WORKBENCH_REPORT_FORMAT_VERSION = "0.4.0"
+LEGACY_WORKBENCH_REPORT_FORMAT_VERSION = "0.3.0"
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_CANVAS_SIZE = 1280
 MODEL_VISIBLE_ALPHA_THRESHOLD = 15
@@ -79,6 +86,14 @@ MODEL_SOURCE_REASON_CODES = frozenset(
         "MODEL_SOURCE_REFERENCE_RGBA_MISMATCH",
     }
 )
+MODEL_ATTESTATION_REASON_CODES = frozenset(
+    {
+        "MODEL_ENTRYPOINT_ATTESTATION_MISSING",
+        "MODEL_ENTRYPOINT_ATTESTATION_MISMATCH",
+    }
+)
+MODEL_LEGACY_ALPHA_THRESHOLD_SOURCE = "legacy-workbench-constant.v1"
+MODEL_PROFILE_ALPHA_THRESHOLD_SOURCE = "model-profile.postprocess.visible_alpha_threshold"
 NORMALIZATION_SOURCE_URI = "inputs/source.bin"
 NORMALIZATION_RASTER_URI = "committed/stage.raster-normalize/attempt.001/normalized.png"
 NORMALIZATION_REPORT_URI = "committed/stage.raster-normalize/attempt.001/normalization-report.json"
@@ -317,16 +332,33 @@ def _artifact(
     }
 
 
-def _png_facts(path: Path, expected_mode: str | tuple[str, ...]) -> dict[str, object]:
-    from PIL import Image
-
+def _png_facts(
+    path: Path,
+    expected_mode: str | tuple[str, ...],
+    expected_canvas: tuple[int, int],
+    label: str = "PNG",
+) -> dict[str, object]:
     modes = (expected_mode,) if isinstance(expected_mode, str) else expected_mode
+    if (
+        len(expected_canvas) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in expected_canvas)
+    ):
+        raise StageContractError("model workbench PNG canvas profile is invalid")
+    backend = _load_pillow()
     try:
-        with Image.open(path, formats=("PNG",)) as image:
-            image.load()
-            if image.format != "PNG" or image.mode not in modes or image.width <= 0 or image.height <= 0:
-                raise StageContractError("model workbench PNG is outside its profile")
-            return {"width": image.width, "height": image.height, "mode": image.mode}
+        with _temporary_max_image_pixels(backend, expected_canvas[0] * expected_canvas[1]):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", backend.Image.DecompressionBombWarning)
+                with backend.Image.open(path, formats=("PNG",)) as image:
+                    if (
+                        image.format != "PNG"
+                        or image.mode not in modes
+                        or image.size != expected_canvas
+                        or getattr(image, "n_frames", 1) != 1
+                    ):
+                        raise StageContractError(f"model workbench {label} canvas is outside its profile")
+                    image.load()
+                    return {"width": image.width, "height": image.height, "mode": image.mode}
     except StageContractError:
         raise
     except Exception as exc:
@@ -550,52 +582,78 @@ def _source_trust(
     return trusted_descriptor, evidence, fidelity_source_path
 
 
-def _rgb_mismatch_mask(difference: object) -> object:
-    from PIL import ImageChops
-
+def _rgb_mismatch_mask(difference: object, image_chops: object | None = None) -> object:
+    if image_chops is None:
+        backend = _load_pillow()
+        image_chops = importlib.import_module(f"{backend.Image.__package__}.ImageChops")
     channels = difference.split()
-    red_green = ImageChops.lighter(channels[0], channels[1])
+    red_green = image_chops.lighter(channels[0], channels[1])
     try:
-        return ImageChops.lighter(red_green, channels[2])
+        return image_chops.lighter(red_green, channels[2])
     finally:
         red_green.close()
         for channel in channels:
             channel.close()
 
 
-def _neutral_fidelity(source_path: Path, reconstruction_path: Path) -> dict[str, object]:
-    from PIL import Image, ImageChops, ImageStat
-
+def _neutral_fidelity(
+    source_path: Path,
+    reconstruction_path: Path,
+    *,
+    alpha_threshold: int,
+    alpha_threshold_source: str,
+) -> dict[str, object]:
+    if (
+        isinstance(alpha_threshold, bool)
+        or not isinstance(alpha_threshold, int)
+        or not 0 <= alpha_threshold <= 255
+        or alpha_threshold_source
+        not in {MODEL_LEGACY_ALPHA_THRESHOLD_SOURCE, MODEL_PROFILE_ALPHA_THRESHOLD_SOURCE}
+    ):
+        raise StageContractError("model workbench neutral fidelity threshold is invalid")
+    backend = _load_pillow()
+    image_chops = importlib.import_module(f"{backend.Image.__package__}.ImageChops")
+    image_stat = importlib.import_module(f"{backend.Image.__package__}.ImageStat")
     try:
-        with Image.open(source_path, formats=("PNG",)) as source_image, Image.open(
-            reconstruction_path,
-            formats=("PNG",),
-        ) as reconstruction_image:
-            source_image.load()
-            reconstruction_image.load()
-            if source_image.size != reconstruction_image.size or source_image.size != (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE):
-                raise StageContractError("model workbench neutral fidelity canvas does not match")
-            source = source_image.convert("RGBA")
-            reconstruction = reconstruction_image.convert("RGBA")
+        with _temporary_max_image_pixels(backend, MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", backend.Image.DecompressionBombWarning)
+                with backend.Image.open(source_path, formats=("PNG",)) as source_image, backend.Image.open(
+                    reconstruction_path,
+                    formats=("PNG",),
+                ) as reconstruction_image:
+                    if (
+                        source_image.format != "PNG"
+                        or reconstruction_image.format != "PNG"
+                        or source_image.size != reconstruction_image.size
+                        or source_image.size != (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE)
+                        or getattr(source_image, "n_frames", 1) != 1
+                        or getattr(reconstruction_image, "n_frames", 1) != 1
+                    ):
+                        raise StageContractError("model workbench neutral fidelity canvas does not match")
+                    source_image.load()
+                    reconstruction_image.load()
+                    source = source_image.convert("RGBA")
+                    reconstruction = reconstruction_image.convert("RGBA")
 
         try:
             with source.getchannel("A") as source_alpha, reconstruction.getchannel("A") as reconstruction_alpha:
                 with source_alpha.point(
-                    lambda value: 255 if value > MODEL_VISIBLE_ALPHA_THRESHOLD else 0
+                    lambda value: 255 if value > alpha_threshold else 0
                 ) as source_visible_mask, reconstruction_alpha.point(
-                    lambda value: 255 if value > MODEL_VISIBLE_ALPHA_THRESHOLD else 0
+                    lambda value: 255 if value > alpha_threshold else 0
                 ) as reconstruction_visible_mask:
                     source_visible_pixels = source_visible_mask.histogram()[255]
                     reconstruction_visible_pixels = reconstruction_visible_mask.histogram()[255]
                     if source_visible_pixels <= 0:
                         raise StageContractError("model workbench source has no visible pixels")
-                    with ImageChops.multiply(source_visible_mask, reconstruction_visible_mask) as covered_mask:
+                    with image_chops.multiply(source_visible_mask, reconstruction_visible_mask) as covered_mask:
                         covered_pixels = covered_mask.histogram()[255]
                     coverage_ratio = covered_pixels / source_visible_pixels
                     with source.convert("RGB") as source_rgb, reconstruction.convert("RGB") as reconstruction_rgb:
-                        with ImageChops.difference(source_rgb, reconstruction_rgb) as difference:
-                            with _rgb_mismatch_mask(difference) as mismatch_mask:
-                                channel_mae = ImageStat.Stat(difference, mask=source_visible_mask).mean
+                        with image_chops.difference(source_rgb, reconstruction_rgb) as difference:
+                            with _rgb_mismatch_mask(difference, image_chops) as mismatch_mask:
+                                channel_mae = image_stat.Stat(difference, mask=source_visible_mask).mean
                                 exact_pixels = mismatch_mask.histogram(mask=source_visible_mask)[0]
             exact_ratio = exact_pixels / source_visible_pixels
             rgb_mae = sum(channel_mae) / len(channel_mae)
@@ -608,7 +666,8 @@ def _neutral_fidelity(source_path: Path, reconstruction_path: Path) -> dict[str,
             )
             return {
                 "status": status,
-                "alpha_threshold": MODEL_VISIBLE_ALPHA_THRESHOLD,
+                "alpha_threshold": alpha_threshold,
+                "alpha_threshold_source": alpha_threshold_source,
                 "visible_pixel_count": reconstruction_visible_pixels,
                 "visible_canvas_ratio": round(
                     reconstruction_visible_pixels / (MODEL_CANVAS_SIZE * MODEL_CANVAS_SIZE),
@@ -824,7 +883,9 @@ def _load_normalization_evidence(run_dir: Path) -> tuple[dict[str, object], dict
     return normalized, report
 
 
-def _identity(result: dict[str, object]) -> dict[str, object]:
+def _identity(
+    result: dict[str, object],
+) -> tuple[dict[str, object], tuple[str, ...], int, str]:
     if result.get("profile_id") == LEGACY_PROFILE_ID:
         legacy_entrypoint = ENTRYPOINT_ROOT / "see_through_v3_nf4.py"
         if (
@@ -833,22 +894,27 @@ def _identity(result: dict[str, object]) -> dict[str, object]:
             or sha256_file(legacy_entrypoint) != LEGACY_ENTRYPOINT_SHA256
         ):
             raise StageContractError("legacy model workbench profile identity does not match")
-        return {
-            "profile_id": LEGACY_PROFILE_ID,
-            "profile_sha256": LEGACY_PROFILE_SHA256,
-            "dependencies_sha256": LEGACY_DEPENDENCIES_SHA256,
-            "upstream_commit": LEGACY_UPSTREAM_COMMIT,
-            "entrypoint_sha256": LEGACY_ENTRYPOINT_SHA256,
-            "quantization": "nf4",
-            "seed": 42,
-            "resolution": 1280,
-            "depth_resolution": 768,
-            "inference_steps": 30,
-            "cpu_offload": True,
-            "group_offload": False,
-            "postprocess_algorithm": "not_applied",
-            "license_status": "supporting_weight_metadata_incomplete_no_redistribution",
-        }
+        return (
+            {
+                "profile_id": LEGACY_PROFILE_ID,
+                "profile_sha256": LEGACY_PROFILE_SHA256,
+                "dependencies_sha256": LEGACY_DEPENDENCIES_SHA256,
+                "upstream_commit": LEGACY_UPSTREAM_COMMIT,
+                "entrypoint_sha256": LEGACY_ENTRYPOINT_SHA256,
+                "quantization": "nf4",
+                "seed": 42,
+                "resolution": 1280,
+                "depth_resolution": 768,
+                "inference_steps": 30,
+                "cpu_offload": True,
+                "group_offload": False,
+                "postprocess_algorithm": "not_applied",
+                "license_status": "supporting_weight_metadata_incomplete_no_redistribution",
+            },
+            (),
+            MODEL_VISIBLE_ALPHA_THRESHOLD,
+            MODEL_LEGACY_ALPHA_THRESHOLD_SOURCE,
+        )
 
     if result.get("profile_id") == LEGACY_SOURCE_PRESERVE_PROFILE_ID:
         legacy_entrypoint = ENTRYPOINT_ROOT / "see_through_v3_nf4_source_preserve.py"
@@ -858,30 +924,33 @@ def _identity(result: dict[str, object]) -> dict[str, object]:
             or sha256_file(legacy_entrypoint) != LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256
         ):
             raise StageContractError("legacy source-preserve model workbench profile identity does not match")
-        return {
-            "profile_id": LEGACY_SOURCE_PRESERVE_PROFILE_ID,
-            "profile_sha256": LEGACY_SOURCE_PRESERVE_PROFILE_SHA256,
-            "dependencies_sha256": LEGACY_DEPENDENCIES_SHA256,
-            "upstream_commit": LEGACY_UPSTREAM_COMMIT,
-            "entrypoint_sha256": LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256,
-            "quantization": "nf4",
-            "seed": 42,
-            "resolution": 1280,
-            "depth_resolution": 768,
-            "inference_steps": 30,
-            "cpu_offload": True,
-            "group_offload": False,
-            "postprocess_algorithm": "source-visible-rgb-by-depth.v1",
-            "license_status": "supporting_weight_metadata_incomplete_no_redistribution",
-        }
+        return (
+            {
+                "profile_id": LEGACY_SOURCE_PRESERVE_PROFILE_ID,
+                "profile_sha256": LEGACY_SOURCE_PRESERVE_PROFILE_SHA256,
+                "dependencies_sha256": LEGACY_DEPENDENCIES_SHA256,
+                "upstream_commit": LEGACY_UPSTREAM_COMMIT,
+                "entrypoint_sha256": LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256,
+                "quantization": "nf4",
+                "seed": 42,
+                "resolution": 1280,
+                "depth_resolution": 768,
+                "inference_steps": 30,
+                "cpu_offload": True,
+                "group_offload": False,
+                "postprocess_algorithm": "source-visible-rgb-by-depth.v1",
+                "license_status": "supporting_weight_metadata_incomplete_no_redistribution",
+            },
+            (),
+            MODEL_VISIBLE_ALPHA_THRESHOLD,
+            MODEL_LEGACY_ALPHA_THRESHOLD_SOURCE,
+        )
 
     profile, profile_bytes = _load_profile()
     code = profile.get("code")
     entrypoint = profile.get("entrypoint")
-    inference = profile.get("inference")
-    postprocess = profile.get("postprocess")
     runtime = profile.get("runtime")
-    if not isinstance(code, dict) or not isinstance(entrypoint, dict) or not isinstance(inference, dict) or not isinstance(postprocess, dict) or not isinstance(runtime, dict):
+    if not isinstance(code, dict) or not isinstance(entrypoint, dict) or not isinstance(runtime, dict):
         raise StageContractError("model workbench profile identity is invalid")
     if (
         result.get("profile_id") != PROFILE_ID
@@ -890,22 +959,44 @@ def _identity(result: dict[str, object]) -> dict[str, object]:
     ):
         raise StageContractError("model workbench profile identity does not match")
     _validated_entrypoint(profile)
-    return {
-        "profile_id": PROFILE_ID,
-        "profile_sha256": result["profile_sha256"],
-        "dependencies_sha256": result["dependencies_sha256"],
-        "upstream_commit": code.get("commit"),
-        "entrypoint_sha256": entrypoint.get("sha256"),
-        "quantization": inference.get("quantization"),
-        "seed": inference.get("seed"),
-        "resolution": inference.get("resolution"),
-        "depth_resolution": inference.get("depth_resolution"),
-        "inference_steps": inference.get("inference_steps"),
-        "cpu_offload": inference.get("cpu_offload"),
-        "group_offload": inference.get("group_offload"),
-        "postprocess_algorithm": postprocess.get("algorithm_id"),
-        "license_status": "supporting_weight_metadata_incomplete_no_redistribution",
-    }
+    inference = _validated_inference(profile)
+    postprocess = _validated_postprocess(profile)
+    attestation_reasons: tuple[str, ...]
+    if "entrypoint_attestation" not in result:
+        attestation = None
+        attestation_reasons = ("MODEL_ENTRYPOINT_ATTESTATION_MISSING",)
+    else:
+        try:
+            attestation = _entrypoint_attestation_dict(result["entrypoint_attestation"])
+        except StageContractError:
+            attestation = None
+            attestation_reasons = ("MODEL_ENTRYPOINT_ATTESTATION_MISMATCH",)
+        else:
+            attestation_reasons = ()
+    if any(reason not in MODEL_ATTESTATION_REASON_CODES for reason in attestation_reasons):
+        raise StageContractError("model workbench attestation reason is invalid")
+    return (
+        {
+            "profile_id": PROFILE_ID,
+            "profile_sha256": result["profile_sha256"],
+            "dependencies_sha256": result["dependencies_sha256"],
+            "upstream_commit": code.get("commit"),
+            "entrypoint_sha256": entrypoint.get("sha256"),
+            "quantization": inference["quantization"],
+            "seed": inference["seed"],
+            "resolution": inference["resolution"],
+            "depth_resolution": inference["depth_resolution"],
+            "inference_steps": inference["inference_steps"],
+            "cpu_offload": inference["cpu_offload"],
+            "group_offload": inference["group_offload"],
+            "postprocess_algorithm": PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+            "entrypoint_attestation": attestation,
+            "license_status": "supporting_weight_metadata_incomplete_no_redistribution",
+        },
+        attestation_reasons,
+        int(postprocess["visible_alpha_threshold"]),
+        MODEL_PROFILE_ALPHA_THRESHOLD_SOURCE,
+    )
 
 
 def build_model_workbench_report(
@@ -932,9 +1023,10 @@ def build_model_workbench_report(
         "files",
         "psd",
     }
+    allowed = required | {"entrypoint_attestation"}
     if (
         not ID_RE.fullmatch(run_id)
-        or set(result) != required
+        or (set(result) != required and set(result) != allowed)
         or result.get("format") != "oneclick2d.model-worker-result"
         or result.get("format_version") != "0.1.0"
         or result.get("scope") != "disposable-local-model-spike"
@@ -948,9 +1040,11 @@ def build_model_workbench_report(
         or SHA256_RE.fullmatch(str(result["dependencies_sha256"])) is None
     ):
         raise StageContractError("model workbench result is invalid")
+    if result.get("profile_id") != PROFILE_ID and "entrypoint_attestation" in result:
+        raise StageContractError("non-active model workbench result has unexpected attestation")
 
     indexed = _indexed_files(run_dir, result)
-    identity = _identity(result)
+    identity, attestation_reasons, alpha_threshold, alpha_threshold_source = _identity(result)
     info = _strict_json(indexed, "input/input/info.json")
     parts = info.get("parts")
     if (
@@ -1005,9 +1099,14 @@ def build_model_workbench_report(
         "model-input-evidence",
         "image/png",
     )
-    source.update(_png_facts(indexed["input/input/src_img.png"][0], "RGBA"))
-    if (source["width"], source["height"]) != (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE):
-        raise StageContractError("model workbench source canvas is outside its profile")
+    source.update(
+        _png_facts(
+            indexed["input/input/src_img.png"][0],
+            "RGBA",
+            (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE),
+            "source",
+        )
+    )
 
     reconstruction = _artifact(
         run_dir,
@@ -1017,29 +1116,45 @@ def build_model_workbench_report(
         "reconstruction",
         "image/png",
     )
-    reconstruction.update(_png_facts(indexed["input/input/reconstruction.png"][0], "RGBA"))
-    if (reconstruction["width"], reconstruction["height"]) != (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE):
-        raise StageContractError("model workbench reconstruction canvas is outside its profile")
+    reconstruction.update(
+        _png_facts(
+            indexed["input/input/reconstruction.png"][0],
+            "RGBA",
+            (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE),
+            "reconstruction",
+        )
+    )
     for source_name in ("src_img.png", "src_head.png"):
-        facts = _png_facts(indexed[f"input/input/{source_name}"][0], "RGBA")
-        if (facts["width"], facts["height"]) != (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE):
-            raise StageContractError("model workbench source canvas is outside its profile")
+        _png_facts(
+            indexed[f"input/input/{source_name}"][0],
+            "RGBA",
+            (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE),
+            "source",
+        )
 
     layers: list[dict[str, object]] = []
     for index, name in enumerate(ordered_names):
         semantic_uri = f"input/input/{name}.png"
         semantic = _artifact(run_dir, indexed, semantic_uri, f"model-layer-{index:02d}", "semantic-rgba", "image/png")
-        semantic_facts = _png_facts(indexed[semantic_uri][0], "RGBA")
+        semantic_facts = _png_facts(
+            indexed[semantic_uri][0],
+            "RGBA",
+            (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE),
+            "semantic",
+        )
         semantic.update(semantic_facts)
-        if (semantic["width"], semantic["height"]) != (MODEL_CANVAS_SIZE, MODEL_CANVAS_SIZE):
-            raise StageContractError("model workbench semantic canvas is outside its profile")
         depth = None
         depth_uri = f"input/input/{name}_depth.png"
         if depth_uri in indexed:
             depth = _artifact(run_dir, indexed, depth_uri, f"model-depth-{index:02d}", "semantic-depth", "image/png")
-            depth.update(_png_facts(indexed[depth_uri][0], "L"))
-            if (depth["width"], depth["height"]) != (semantic["width"], semantic["height"]):
-                raise StageContractError("model workbench depth canvas does not match its semantic layer")
+            depth.update(
+                _png_facts(
+                    indexed[depth_uri][0],
+                    "L",
+                    (int(semantic["width"]), int(semantic["height"])),
+                    "depth",
+                )
+            )
         layers.append({"index": index, "name": name, "artifact": semantic, "depth_artifact": depth})
 
     psd_value = result.get("psd")
@@ -1127,10 +1242,15 @@ def build_model_workbench_report(
     neutral_fidelity = _neutral_fidelity(
         fidelity_source_path,
         indexed["input/input/reconstruction.png"][0],
+        alpha_threshold=alpha_threshold,
+        alpha_threshold_source=alpha_threshold_source,
     )
     neutral_fidelity["source_trust_status"] = source_trust["status"]
-    neutral_fidelity["reason_codes"] = list(source_trust["reason_codes"])
-    if source_trust["status"] != "pass":
+    quality_reasons = [*attestation_reasons, *source_trust["reason_codes"]]
+    if any(reason not in MODEL_ATTESTATION_REASON_CODES | MODEL_SOURCE_REASON_CODES for reason in quality_reasons):
+        raise StageContractError("model workbench quality reason is invalid")
+    neutral_fidelity["reason_codes"] = list(quality_reasons)
+    if source_trust["status"] != "pass" or attestation_reasons:
         neutral_fidelity["status"] = "review_required"
     review_items = [
         "semantic_correctness",
@@ -1145,16 +1265,18 @@ def build_model_workbench_report(
         review_items.insert(0, "neutral_visible_pixel_fidelity")
     if source_trust["status"] != "pass":
         review_items.insert(0, "trusted_source_reference")
+    if attestation_reasons:
+        review_items.insert(0, "entrypoint_runtime_provenance")
 
     report: dict[str, object] = {
         "format": "oneclick2d.local-image-workbench-report",
-        "format_version": "0.3.0",
+        "format_version": WORKBENCH_REPORT_FORMAT_VERSION,
         "scope": "disposable-local-image-workbench",
         "run_id": run_id,
         "workflow": "model",
         "state": "completed",
         "local_status": "LOCAL_WORKBENCH_COMPLETED",
-        "model_used": source_trust["status"] == "pass",
+        "model_used": source_trust["status"] == "pass" and not attestation_reasons,
         "oc2d_produced": False,
         "gate_f_status": "GATE_F_NOT_EVALUATED",
         "source_retention": (
@@ -1178,7 +1300,7 @@ def build_model_workbench_report(
         },
         "quality": {
             "status": "review_required",
-            "reason_codes": list(source_trust["reason_codes"]),
+            "reason_codes": list(quality_reasons),
             "source_trust": source_trust,
             "neutral_fidelity": neutral_fidelity,
             "review_items": review_items,
@@ -1202,6 +1324,31 @@ def build_model_workbench_report(
     if normalization_value is not None:
         report["normalization"] = normalization_value
     return report
+
+
+def _project_legacy_model_workbench_report(
+    report: dict[str, object],
+) -> dict[str, object]:
+    model = report.get("model")
+    quality = report.get("quality")
+    if not isinstance(model, dict) or not isinstance(quality, dict):
+        raise StageContractError("model workbench report projection is invalid")
+    identity = model.get("identity")
+    neutral_fidelity = quality.get("neutral_fidelity")
+    if not isinstance(identity, dict) or not isinstance(neutral_fidelity, dict):
+        raise StageContractError("model workbench report projection is invalid")
+    projected_identity = dict(identity)
+    projected_identity.pop("entrypoint_attestation", None)
+    projected_neutral_fidelity = dict(neutral_fidelity)
+    projected_neutral_fidelity.pop("alpha_threshold_source", None)
+    projected = dict(report)
+    projected["format_version"] = LEGACY_WORKBENCH_REPORT_FORMAT_VERSION
+    projected["model"] = {**model, "identity": projected_identity}
+    projected["quality"] = {
+        **quality,
+        "neutral_fidelity": projected_neutral_fidelity,
+    }
+    return projected
 
 
 def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
@@ -1237,6 +1384,19 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
         if not isinstance(persisted_value, dict):
             raise StageContractError("model workbench report is invalid")
         persisted = persisted_value
+        persisted_version = persisted.get("format_version")
+        if persisted_version not in {
+            LEGACY_WORKBENCH_REPORT_FORMAT_VERSION,
+            WORKBENCH_REPORT_FORMAT_VERSION,
+        }:
+            raise StageContractError("persisted model workbench report format version is unsupported")
+        if (
+            persisted_version == LEGACY_WORKBENCH_REPORT_FORMAT_VERSION
+            and value.get("profile_id") == PROFILE_ID
+        ):
+            raise StageContractError(
+                "persisted model workbench report format version 0.3.0 is unsupported for the active profile"
+            )
         if "normalization" in persisted:
             normalization, normalization_report = _load_normalization_evidence(run_dir)
             phases = MODEL_PHASES
@@ -1248,8 +1408,19 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
         normalization_report=normalization_report,
         phases=phases,
     )
-    if persisted is not None and persisted != report:
-        raise StageContractError("persisted model workbench report does not match validated evidence")
+    if persisted is not None:
+        persisted_version = persisted["format_version"]
+        if persisted_version == LEGACY_WORKBENCH_REPORT_FORMAT_VERSION:
+            profile_id = report["model"]["identity"]["profile_id"]
+            if profile_id not in {LEGACY_PROFILE_ID, LEGACY_SOURCE_PRESERVE_PROFILE_ID}:
+                raise StageContractError(
+                    "persisted model workbench report format version 0.3.0 is unsupported for a non-historical profile"
+                )
+            expected_persisted = _project_legacy_model_workbench_report(report)
+        else:
+            expected_persisted = report
+        if persisted != expected_persisted:
+            raise StageContractError("persisted model workbench report does not match validated evidence")
     motion_directory = run_dir / "motion-draft"
     if motion_directory.exists() or motion_directory.is_symlink():
         try:

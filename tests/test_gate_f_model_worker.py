@@ -216,6 +216,13 @@ def _valid_entrypoint_attestation() -> dict[str, object]:
     }
 
 
+def _valid_entrypoint_attestation_summary() -> dict[str, object]:
+    value = _valid_entrypoint_attestation()
+    value.pop("format")
+    value.pop("format_version")
+    return value
+
+
 def _unpack_packbits(data: bytes, expected_length: int) -> bytes:
     decoded = bytearray()
     offset = 0
@@ -525,7 +532,32 @@ class GateFModelWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "attestation.json"
             path.write_text(json.dumps(_valid_entrypoint_attestation()), encoding="utf-8")
-            _consume_entrypoint_attestation(path)
+            summary = _consume_entrypoint_attestation(path)
+            self.assertFalse(path.exists())
+            self.assertEqual(NF4_MARIGOLD_DEVICE_POLICY_ID, summary["policy_id"])
+            self.assertEqual("cuda:0", summary["execution_device"])
+            self.assertEqual(
+                "sequential-cpu-offload",
+                summary["components"]["vae"]["disposition"],
+            )
+            self.assertTrue(summary["components"]["vae"]["upstream_cuda_move_suppressed"])
+            self.assertEqual(
+                PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+                summary["psd_pixel_projection_algorithm_id"],
+            )
+            with self.assertRaises(TypeError):
+                summary["policy_id"] = "changed"
+            with self.assertRaises(TypeError):
+                summary["components"]["vae"]["disposition"] = "changed"
+
+    def test_entrypoint_attestation_rejects_missing_required_field(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "attestation.json"
+            attestation = _valid_entrypoint_attestation()
+            del attestation["psd_pixel_projection_algorithm_id"]
+            path.write_text(json.dumps(attestation), encoding="utf-8")
+            with self.assertRaisesRegex(StageContractError, "entrypoint attestation is invalid"):
+                _consume_entrypoint_attestation(path)
             self.assertFalse(path.exists())
 
     def test_entrypoint_attestation_rejects_all_cuda_components(self) -> None:
@@ -538,6 +570,26 @@ class GateFModelWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(StageContractError, "device attestation"):
                 _consume_entrypoint_attestation(path)
             self.assertFalse(path.exists())
+
+    def test_entrypoint_attestation_rejects_component_devices_not_equal_to_execution_device(self) -> None:
+        cases = (
+            ("vae", "execution_hook_devices", ["cuda"]),
+            ("vae", "execution_hook_devices", ["cuda:1"]),
+            ("vae", "execution_hook_devices", ["cuda:0", "cuda:1"]),
+            ("unet", "storage_devices", ["cuda"]),
+            ("unet", "storage_devices", ["cuda:1"]),
+            ("unet", "storage_devices", ["cuda:0", "cuda:1"]),
+        )
+        for component, field, devices in cases:
+            with self.subTest(component=component, field=field, devices=devices):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "attestation.json"
+                    attestation = _valid_entrypoint_attestation()
+                    attestation["components"][component][field] = devices
+                    path.write_text(json.dumps(attestation), encoding="utf-8")
+                    with self.assertRaisesRegex(StageContractError, "device attestation"):
+                        _consume_entrypoint_attestation(path)
+                    self.assertFalse(path.exists())
 
     def test_nf4_marigold_policy_never_places_all_components_on_cuda(self) -> None:
         timeline: list[tuple[str, str, str]] = []
@@ -732,7 +784,10 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
 
             def invoke(source_path, output_path, profile, timeout_seconds):
                 _write_complete_model_output(output_path)
-                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+                return (
+                    mock.Mock(returncode=0, stdout=b"", stderr=b""),
+                    _valid_entrypoint_attestation_summary(),
+                )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
                 "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
@@ -742,6 +797,10 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
             self.assertFalse(report["oc2d_produced"])
             self.assertEqual("GATE_F_NOT_EVALUATED", report["gate_f_status"])
             self.assertEqual("input/input.psd", report["psd"]["uri"])
+            self.assertEqual(
+                PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+                report["entrypoint_attestation"]["psd_pixel_projection_algorithm_id"],
+            )
 
     def test_worker_rejects_successful_process_with_partial_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -754,7 +813,10 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 result_root = output_path / "input"
                 (result_root / source_path.stem).mkdir(parents=True)
                 (result_root / "input.psd").write_bytes(_minimal_psd())
-                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+                return (
+                    mock.Mock(returncode=0, stdout=b"", stderr=b""),
+                    _valid_entrypoint_attestation_summary(),
+                )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
                 "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
@@ -774,7 +836,10 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 info = output_path / "input" / source_path.stem / "info.json"
                 changed = {"parts": {**{name: {} for name in MODEL_PART_NAMES[:-1]}, "other": {}}}
                 info.write_text(json.dumps(changed, separators=(",", ":")), encoding="utf-8")
-                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+                return (
+                    mock.Mock(returncode=0, stdout=b"", stderr=b""),
+                    _valid_entrypoint_attestation_summary(),
+                )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
                 "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
@@ -792,7 +857,10 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
             def invoke(source_path, output_path, profile, timeout_seconds):
                 _write_complete_model_output(output_path)
                 (output_path / "input" / "input.psd").write_bytes(b"8BPSmodel")
-                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+                return (
+                    mock.Mock(returncode=0, stdout=b"", stderr=b""),
+                    _valid_entrypoint_attestation_summary(),
+                )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
                 "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
@@ -810,7 +878,10 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
             def invoke(source_path, output_path, profile, timeout_seconds):
                 _write_complete_model_output(output_path)
                 (output_path / "input" / "input_depth.psd").write_bytes(b"8BPSdepth")
-                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+                return (
+                    mock.Mock(returncode=0, stdout=b"", stderr=b""),
+                    _valid_entrypoint_attestation_summary(),
+                )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
                 "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
@@ -831,7 +902,10 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 metadata["parts"]["face"]["xyxy"] = [1, 0, 1280, 1280]
                 metadata_path.write_text(json.dumps(metadata, separators=(",", ":")), encoding="utf-8")
-                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+                return (
+                    mock.Mock(returncode=0, stdout=b"", stderr=b""),
+                    _valid_entrypoint_attestation_summary(),
+                )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
                 "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
@@ -847,7 +921,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
             output = root / "output"
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
                 "spikes.gate_f_runner.model_worker._invoke_wsl",
-                return_value=mock.Mock(returncode=1, stdout=b"", stderr=b"private detail"),
+                return_value=(mock.Mock(returncode=1, stdout=b"", stderr=b"private detail"), None),
             ):
                 with self.assertRaisesRegex(StageContractError, "model worker process failed"):
                     run_model_worker(source, output, timeout_seconds=30)

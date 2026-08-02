@@ -7,10 +7,8 @@ from hashlib import sha256
 import io
 import json
 import re
-import struct
 import tempfile
 import warnings
-import zlib
 from pathlib import Path
 
 from .candidate_baseline import build_gate_f_registry
@@ -19,6 +17,12 @@ from .frame_sequence import build_gate_f_frame_sequence, parse_gate_f_frame_sequ
 from .paired_experiment import PairOutcome, arm_identity_from_report, evaluate_experiment, validate_arm_parity
 from .psd_reader import parse_layered_psd
 from .psd_writer import PsdLayer, write_layered_psd
+from .purpose_created import (
+    MAX_ARM_BUNDLE_OUTPUT_BYTES as _MAX_ARM_BUNDLE_OUTPUT_BYTES,
+    arm_run_spec as _arm_run_spec,
+    normalization_config as _normalization_config,
+    purpose_created_source as _purpose_created_source,
+)
 from .raster import _load_pillow, _verify_output_png
 from .rendering import RENDERER_CONTRACT_ID, RENDERER_PROFILE_ID
 from .runner import PipelineRunner
@@ -26,7 +30,6 @@ from .runtime import ID_RE, MAX_JSON_BYTES, SHA256_RE, canonical_json_bytes, con
 
 
 MAX_BUNDLE_ARTIFACT_BYTES = 512 * 1024 * 1024
-_MAX_ARM_BUNDLE_OUTPUT_BYTES = 33_554_432
 _ROOT = Path(__file__).resolve().parents[2]
 _BUNDLE_ARTIFACT_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.(?:json|png|psd)$")
 _REQUIRED_ARTIFACT_NAMES = frozenset(
@@ -104,99 +107,6 @@ def purpose_created_outcomes() -> tuple[PairOutcome, ...]:
 
 def purpose_created_statistics() -> dict[str, object]:
     return evaluate_experiment(purpose_created_outcomes())
-
-
-def _purpose_created_source(width: int = 101, height: int = 103) -> bytes:
-    def chunk(kind: bytes, payload: bytes) -> bytes:
-        checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
-        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
-
-    rows = []
-    for y in range(height):
-        row = bytearray([0])
-        for x in range(width):
-            row.extend(((x * 3) % 256, (y * 5) % 256, ((x + y) * 7) % 256, 255))
-        rows.append(bytes(row))
-    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"sRGB", b"\x00") + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b"")
-
-
-def _normalization_config() -> bytes:
-    return canonical_json_bytes(
-        {
-            "max_width": 8192,
-            "max_height": 8192,
-            "max_pixels": 40000000,
-            "max_metadata_bytes": 1048576,
-            "max_icc_profile_bytes": 1048576,
-            "required_pillow_version": "12.1.0",
-            "png_compress_level": 9,
-            "rendering_intent": 1,
-        }
-    )
-
-
-def _arm_run_spec(source: bytes, normalize: bytes, arm_config: bytes, arm: str) -> bytes:
-    limits = {
-        "max_wall_time_ms": 30000,
-        "max_cpu_time_ms": 30000,
-        "max_peak_ram_bytes": 536870912,
-        "max_scratch_bytes": 1048576,
-        "max_output_bytes": _MAX_ARM_BUNDLE_OUTPUT_BYTES,
-        "max_output_files": 2,
-        "max_peak_vram_bytes": 0,
-        "gpu_allowed": False,
-    }
-    if arm == "candidate":
-        stage = {
-            "id": "stage.arm-render",
-            "stage_type": "oc2d.spike.candidate-baseline",
-            "adapter_id": "candidate.baseline.pillow.v1",
-            "config_uri": "configs/arm.json",
-            "config_sha256": sha256(arm_config).hexdigest(),
-            "limits": {**limits, "max_output_files": 43},
-        }
-        result_role = "candidate_baseline_report"
-    elif arm == "comparator":
-        stage = {
-            "id": "stage.arm-render",
-            "stage_type": "oc2d.spike.simple-cutout-comparator",
-            "adapter_id": "simple-cutout.comparator.pillow.v1",
-            "config_uri": "configs/arm.json",
-            "config_sha256": sha256(arm_config).hexdigest(),
-            "limits": {**limits, "max_output_files": 38},
-        }
-        result_role = "simple_cutout_comparator_report"
-    else:
-        raise StageContractError("unknown preflight arm")
-    return canonical_json_bytes(
-        {
-            "$schema": str(_ROOT / "schemas" / "gate-f-run-spec" / "v0.1" / "run-spec.schema.json"),
-            "format": "oneclick2d.gate-f-run-spec",
-            "format_version": "0.1.0",
-            "scope": "disposable-gate-f-spike",
-            "execution_profile": "python-pillow-12.1.0-in-process-v1",
-            "root_seed_u64": "00000000000000000042",
-            "source": {
-                "role": "source_raster",
-                "sha256": sha256(source).hexdigest(),
-                "media_type": "image/png",
-                "max_bytes": 26214400,
-            },
-            "expected_result_role": result_role,
-            "stages": [
-                {
-                    "id": "stage.raster-normalize",
-                    "stage_type": "oc2d.spike.raster-normalize",
-                    "adapter_id": "raster.normalize.pillow.v1",
-                    "config_uri": "configs/normalize.json",
-                    "config_sha256": sha256(normalize).hexdigest(),
-                    "limits": limits,
-                },
-                stage,
-            ],
-        }
-    )
 
 
 @lru_cache(maxsize=1)
@@ -338,6 +248,10 @@ def _regular_bundle_inventory(directory: Path) -> dict[str, Path]:
     return inventory
 
 
+def _trusted_evidence_descriptors(evidence: dict[str, bytes]) -> dict[str, tuple[str, int]]:
+    return {name: (sha256(data).hexdigest(), len(data)) for name, data in evidence.items()}
+
+
 def _read_verified_bundle_index(
     directory: Path,
 ) -> tuple[dict[str, object], dict[str, Path], dict[str, tuple[str, int]], dict[str, bytes]]:
@@ -359,6 +273,9 @@ def _read_verified_bundle_index(
     ):
         raise StageContractError("bundle index contract is invalid")
 
+    trusted_evidence: dict[str, bytes] = {}
+    trusted_descriptors: dict[str, tuple[str, int]] = {}
+    trusted_evidence_initialized = False
     descriptors: dict[str, tuple[str, int]] = {}
     for entry in index["entries"]:
         if not isinstance(entry, dict) or set(entry) != {"name", "sha256", "byte_length"}:
@@ -376,11 +293,19 @@ def _read_verified_bundle_index(
             or not 1 <= byte_length <= MAX_BUNDLE_ARTIFACT_BYTES
         ):
             raise StageContractError("bundle entry name, digest or size is invalid")
-        descriptors[name] = (digest, byte_length)
+        if not trusted_evidence_initialized:
+            trusted_evidence = dict(_purpose_created_bundle_evidence())
+            trusted_descriptors = _trusted_evidence_descriptors(trusted_evidence)
+            trusted_evidence_initialized = True
+        descriptor = (digest, byte_length)
+        if trusted_descriptors.get(name) != descriptor:
+            raise StageContractError(
+                f"{_fixture_mismatch_reason(name)}: bundle descriptor does not match trusted purpose-created evidence"
+            )
+        descriptors[name] = descriptor
     if set(descriptors) != _REQUIRED_ARTIFACT_NAMES:
         raise StageContractError("bundle evidence inventory is not exact")
 
-    trusted_evidence = dict(_purpose_created_bundle_evidence())
     arm_names = {
         name
         for name in _REQUIRED_ARTIFACT_NAMES

@@ -447,6 +447,7 @@ class GateFModelMotionDraftTests(unittest.TestCase):
             result["profile_id"] = LEGACY_PROFILE_ID
             result["profile_sha256"] = LEGACY_PROFILE_SHA256
             result["dependencies_sha256"] = LEGACY_DEPENDENCIES_SHA256
+            result.pop("entrypoint_attestation")
             (run_dir / "model-result.json").write_bytes(canonical_json_bytes(result))
 
             with self.assertRaisesRegex(StageContractError, "active model profile"):
