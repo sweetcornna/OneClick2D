@@ -44,8 +44,8 @@ from .runtime import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "examples" / "gate-f-model-motion-draft" / "config.json"
-CONFIG_SHA256 = "42a7effbde7deee0986fe1b216babf24b5d65f7f85400cf585e13239eb5d847e"
-PROFILE_ID = "oc2d.spike.model-motion-draft.affine-semantic.v13"
+CONFIG_SHA256 = "b9fea23f0f78cad83a5a87ae453ef957107bb065cf482cde85e531781d0e1db9"
+PROFILE_ID = "oc2d.spike.model-motion-draft.affine-semantic.v14"
 ALGORITHM_ID = "source-visible-features-feathered-underpaint-grouped-eye-subject-matte-hard-edge-padded-quad-affine-premultiplied.v13"
 REPORT_NAME = "motion-report.json"
 OUTPUT_DIRECTORY = "motion-draft"
@@ -148,7 +148,7 @@ def _config() -> tuple[dict[str, object], Any, Any]:
     if (
         set(value) != keys
         or value.get("format") != "oneclick2d.model-motion-draft-config"
-        or value.get("format_version") != "0.1.0"
+        or value.get("format_version") != "0.2.0"
         or value.get("profile_id") != PROFILE_ID
         or value.get("required_model_profile_id") != MODEL_PROFILE_ID
         or value.get("required_pillow_version") != "12.1.0"
@@ -1036,7 +1036,7 @@ def generate_model_motion_draft(run_dir: Path) -> tuple[Path, dict[str, object]]
         comparison = _neutral_comparison(reconstruction_path, temporary / str(Path(frames[0]["artifact"]["uri"]).name))
         report = {
             "format": "oneclick2d.model-motion-draft-report",
-            "format_version": "0.1.0",
+            "format_version": "0.2.0",
             "scope": "disposable-local-model-spike",
             "run_id": run_dir.name,
             "profile": {
@@ -1123,7 +1123,7 @@ def load_model_motion_draft_report(
         not isinstance(report, dict)
         or set(report) != required
         or report.get("format") != "oneclick2d.model-motion-draft-report"
-        or report.get("format_version") != "0.1.0"
+        or report.get("format_version") != "0.2.0"
         or report.get("scope") != "disposable-local-model-spike"
         or report.get("run_id") != run_dir.name
     ):

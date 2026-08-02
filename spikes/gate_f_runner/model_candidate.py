@@ -38,8 +38,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "examples" / "gate-f-model-candidate" / "config.json"
 ONTOLOGY_PATH = ROOT / "registries" / "ontology-v0.1.yaml"
 ONTOLOGY_SHA256 = "ea03fdf0e757a9e15519b6fe7bad7ed50b7d736214cca3b8b74bfb9b57aa1c76"
-CONFIG_SHA256 = "e1a2e713c1f0ce27775794b05efac338fe6e6d9bd750169b577caf311b8dd37b"
-PROFILE_ID = "oc2d.spike.model-candidate.source-preserve-v4.v1"
+CONFIG_SHA256 = "feaff775a888e85d1f95b0f09c4162f118f02cf084e73837e0f0ab6c4dc92b4c"
+PROFILE_ID = "oc2d.spike.model-candidate.source-preserve-v5.v1"
 REPORT_NAME = "candidate-report.json"
 PREFLIGHT_REPORT_NAME = "preflight-report.json"
 OUTPUT_DIRECTORY = "model-candidate-preflight"
@@ -106,7 +106,7 @@ def _config() -> dict[str, object]:
         raise StageContractError("model candidate config does not match the frozen profile")
     expected = {
         "format": "oneclick2d.model-candidate-config",
-        "format_version": "0.1.0",
+        "format_version": "0.2.0",
         "profile_id": PROFILE_ID,
         "required_model_profile_id": MODEL_PROFILE_ID,
         "required_motion_profile_id": MOTION_PROFILE_ID,
@@ -118,7 +118,7 @@ def _config() -> dict[str, object]:
             "sha256": ONTOLOGY_SHA256,
         },
         "postprocess": {
-            "semantic_alpha_state": "source-preserve-v4-cleaned",
+            "semantic_alpha_state": "source-preserve-v5-cleaned",
             "visible_alpha_threshold": SOURCE_VISIBLE_ALPHA_THRESHOLD,
             "visible_priority": list(VISIBLE_PRIORITY),
         },
@@ -389,7 +389,7 @@ def _motion_lineage(motion: MotionRecomputation) -> list[dict[str, object]]:
         if not isinstance(layer, dict):
             raise StageContractError("model candidate motion layer is invalid")
         semantic = str(layer["semantic"])
-        operations = ["source-preserve-v4-alpha-clean", "subject-matte", "bbox-crop-padding-4"]
+        operations = ["source-preserve-v5-alpha-clean", "subject-matte", "bbox-crop-padding-4"]
         if semantic == "face":
             operations.append("deterministic-face-underpaint")
         if semantic in {"eye", "eyebrow", "nose", "mouth"}:
@@ -507,7 +507,7 @@ def _analyze_model(
                 "kind": "source-transparent-exposed",
                 "semantic": "union",
                 "mask": descriptors["mask.source-transparent-exposed.png"],
-                "producer": "model-source-preserve-v4",
+                "producer": "model-source-preserve-v5",
                 "confidence": "not_available_review_required",
                 "motion_reveal_scope": "shared-37-frame-research-draft",
                 "feather_pixels": 0,
@@ -695,7 +695,7 @@ def _candidate_document(
         })
     return {
         "format": "oneclick2d.model-candidate-report",
-        "format_version": "0.1.0",
+        "format_version": "0.2.0",
         "scope": "disposable-local-model-candidate-preflight",
         "run_id": run_dir.name,
         "profile": {
@@ -764,7 +764,7 @@ def _candidate_document(
 def _preflight_document(run_dir: Path, candidate_data: bytes, comparator_data: bytes, normalized_data: bytes, normalization_data: bytes) -> dict[str, object]:
     return {
         "format": "oneclick2d.model-candidate-preflight-report",
-        "format_version": "0.1.0",
+        "format_version": "0.2.0",
         "scope": "single-item-disposable-local-technical-preflight",
         "run_id": run_dir.name,
         "local_status": "LOCAL_MODEL_CANDIDATE_PREFLIGHT_COMPLETED",

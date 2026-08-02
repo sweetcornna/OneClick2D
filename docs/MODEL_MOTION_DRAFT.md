@@ -1,12 +1,12 @@
 # 模型动态研究初稿规范
 
 - **状态**：Gate F 前可丢弃预研；不是 CIR 或 `.oc2d`
-- **固定 profile**：`oc2d.spike.model-motion-draft.affine-semantic.v13`
+- **固定 profile**：`oc2d.spike.model-motion-draft.affine-semantic.v14`
 - **目的**：把受检 See-through 语义层接入确定性四边形、最小参数绑定和共享 37 帧轨迹，尽早暴露真实拆层在运动中的孔洞、接缝和语义错误。
 
 ## 输入边界
 
-输入必须是完整通过 `source-preserve.v4` 模型工作台校验的本地运行。生成器只读取清单内的 RGBA 语义层、重建图、模型结果摘要和固定帧序列配置；不调用模型、不读取外网、不修改模型产物。
+输入必须是完整通过 `source-preserve.v5` 模型工作台校验的本地运行。生成器只读取清单内的 RGBA 语义层、重建图、模型结果摘要和固定帧序列配置；不调用模型、不读取外网、不修改模型产物。
 
 ## 固定能力
 

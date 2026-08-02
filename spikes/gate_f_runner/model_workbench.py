@@ -30,13 +30,22 @@ from .model_worker import (
     LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256,
     LEGACY_SOURCE_PRESERVE_PROFILE_ID,
     LEGACY_SOURCE_PRESERVE_PROFILE_SHA256,
+    LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256,
+    LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+    LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
+    LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     LEGACY_UPSTREAM_COMMIT,
     MAX_MODEL_RESULT_BYTES,
     MODEL_PART_NAMES,
     PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     PROFILE_ID,
+    PROFILE_ROOT,
+    _artifact_manifest,
+    _artifact_manifest_digest,
     _entrypoint_attestation_dict,
+    _legacy_v4_entrypoint_attestation_dict,
     _load_profile,
+    _validated_archived_entrypoint,
     _validated_entrypoint,
     _validated_inference,
     _validated_postprocess,
@@ -69,7 +78,8 @@ IMPORTED_MODEL_PHASES = tuple(phase for phase in MODEL_PHASES if phase != "RASTE
 MODEL_TIMEOUT_SECONDS = 3600
 MODEL_RESULT_NAME = "model-result.json"
 WORKBENCH_REPORT_NAME = "workbench-report.json"
-WORKBENCH_REPORT_FORMAT_VERSION = "0.4.0"
+WORKBENCH_REPORT_FORMAT_VERSION = "0.5.0"
+LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION = "0.4.0"
 LEGACY_WORKBENCH_REPORT_FORMAT_VERSION = "0.3.0"
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_CANVAS_SIZE = 1280
@@ -885,6 +895,7 @@ def _load_normalization_evidence(run_dir: Path) -> tuple[dict[str, object], dict
 
 def _identity(
     result: dict[str, object],
+    output_root: Path,
 ) -> tuple[dict[str, object], tuple[str, ...], int, str]:
     if result.get("profile_id") == LEGACY_PROFILE_ID:
         legacy_entrypoint = ENTRYPOINT_ROOT / "see_through_v3_nf4.py"
@@ -946,6 +957,109 @@ def _identity(
             MODEL_LEGACY_ALPHA_THRESHOLD_SOURCE,
         )
 
+    if result.get("profile_id") == LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID:
+        legacy_profile_path = PROFILE_ROOT / "see-through-v3-nf4.source-preserve-v4.json"
+        legacy_profile_exact = read_bounded_file(legacy_profile_path, 256 * 1024)
+        legacy_profile = strict_load_json_bytes(legacy_profile_exact)
+        if (
+            not isinstance(legacy_profile, dict)
+            or legacy_profile.get("profile_id") != LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
+            or sha256_bytes(legacy_profile_exact) != LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
+            or result.get("profile_sha256") != LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
+            or result.get("dependencies_sha256") != LEGACY_DEPENDENCIES_SHA256
+        ):
+            raise StageContractError("legacy v4 source-preserve model workbench profile identity does not match")
+        code = legacy_profile.get("code")
+        entrypoint = legacy_profile.get("entrypoint")
+        runtime = legacy_profile.get("runtime")
+        if not isinstance(code, dict) or not isinstance(entrypoint, dict) or not isinstance(runtime, dict):
+            raise StageContractError("legacy v4 source-preserve model workbench profile is invalid")
+        legacy_entrypoint = _validated_archived_entrypoint(legacy_profile)
+        if (
+            sha256_file(legacy_entrypoint) != LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256
+            or entrypoint.get("sha256") != LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256
+            or runtime.get("dependencies_sha256") != LEGACY_DEPENDENCIES_SHA256
+        ):
+            raise StageContractError("legacy v4 source-preserve model workbench entrypoint identity does not match")
+        inference = legacy_profile.get("inference")
+        postprocess = legacy_profile.get("postprocess")
+        if (
+            not isinstance(inference, dict)
+            or set(inference)
+            != {
+                "quantization",
+                "seed",
+                "resolution",
+                "depth_resolution",
+                "inference_steps",
+                "cpu_offload",
+                "group_offload",
+                "cuda_allocator",
+                "left_right_split",
+            }
+            or not isinstance(inference.get("quantization"), str)
+            or not inference["quantization"]
+            or isinstance(inference.get("seed"), bool)
+            or not isinstance(inference.get("seed"), int)
+            or any(
+                isinstance(inference.get(key), bool)
+                or not isinstance(inference.get(key), int)
+                or inference[key] <= 0
+                for key in ("resolution", "depth_resolution", "inference_steps")
+            )
+            or not isinstance(inference.get("cpu_offload"), bool)
+            or not isinstance(inference.get("group_offload"), bool)
+            or not isinstance(inference.get("cuda_allocator"), str)
+            or not inference["cuda_allocator"]
+            or not isinstance(inference.get("left_right_split"), bool)
+            or not isinstance(postprocess, dict)
+            or set(postprocess)
+            != {"algorithm_id", "visible_alpha_threshold", "neutral_reconstruction"}
+            or not isinstance(postprocess.get("algorithm_id"), str)
+            or not postprocess["algorithm_id"]
+            or isinstance(postprocess.get("visible_alpha_threshold"), bool)
+            or not isinstance(postprocess.get("visible_alpha_threshold"), int)
+            or not 0 <= postprocess["visible_alpha_threshold"] <= 255
+            or not isinstance(postprocess.get("neutral_reconstruction"), str)
+            or not postprocess["neutral_reconstruction"]
+        ):
+            raise StageContractError("legacy v4 source-preserve model workbench profile is invalid")
+        if "entrypoint_attestation" not in result:
+            attestation = None
+            attestation_reasons = ("MODEL_ENTRYPOINT_ATTESTATION_MISSING",)
+        else:
+            try:
+                attestation = _legacy_v4_entrypoint_attestation_dict(
+                    result["entrypoint_attestation"]
+                )
+            except StageContractError:
+                attestation = None
+                attestation_reasons = ("MODEL_ENTRYPOINT_ATTESTATION_MISMATCH",)
+            else:
+                attestation_reasons = ()
+        return (
+            {
+                "profile_id": LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+                "profile_sha256": LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
+                "dependencies_sha256": LEGACY_DEPENDENCIES_SHA256,
+                "upstream_commit": code.get("commit"),
+                "entrypoint_sha256": LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256,
+                "quantization": inference["quantization"],
+                "seed": inference["seed"],
+                "resolution": inference["resolution"],
+                "depth_resolution": inference["depth_resolution"],
+                "inference_steps": inference["inference_steps"],
+                "cpu_offload": inference["cpu_offload"],
+                "group_offload": inference["group_offload"],
+                "postprocess_algorithm": postprocess["algorithm_id"],
+                "entrypoint_attestation": attestation,
+                "license_status": "supporting_weight_metadata_incomplete_no_redistribution",
+            },
+            attestation_reasons,
+            int(postprocess["visible_alpha_threshold"]),
+            MODEL_PROFILE_ALPHA_THRESHOLD_SOURCE,
+        )
+
     profile, profile_bytes = _load_profile()
     code = profile.get("code")
     entrypoint = profile.get("entrypoint")
@@ -968,6 +1082,19 @@ def _identity(
     else:
         try:
             attestation = _entrypoint_attestation_dict(result["entrypoint_attestation"])
+            if attestation["binding"]["source_sha256"] != result.get("source_sha256"):
+                raise StageContractError("model entrypoint attestation source binding does not match")
+            published_manifest = _artifact_manifest(
+                output_root / "input",
+                output_root / "input" / ".entrypoint-attestation.json",
+            )
+            if (
+                _artifact_manifest_digest(published_manifest)
+                != attestation["binding"]["artifact_manifest_digest"]
+            ):
+                raise StageContractError(
+                    "model entrypoint attestation artifact manifest binding does not match"
+                )
         except StageContractError:
             attestation = None
             attestation_reasons = ("MODEL_ENTRYPOINT_ATTESTATION_MISMATCH",)
@@ -1040,11 +1167,18 @@ def build_model_workbench_report(
         or SHA256_RE.fullmatch(str(result["dependencies_sha256"])) is None
     ):
         raise StageContractError("model workbench result is invalid")
-    if result.get("profile_id") != PROFILE_ID and "entrypoint_attestation" in result:
+    if (
+        result.get("profile_id")
+        not in {PROFILE_ID, LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID}
+        and "entrypoint_attestation" in result
+    ):
         raise StageContractError("non-active model workbench result has unexpected attestation")
 
     indexed = _indexed_files(run_dir, result)
-    identity, attestation_reasons, alpha_threshold, alpha_threshold_source = _identity(result)
+    identity, attestation_reasons, alpha_threshold, alpha_threshold_source = _identity(
+        result,
+        run_dir / "model-output",
+    )
     info = _strict_json(indexed, "input/input/info.json")
     parts = info.get("parts")
     if (
@@ -1351,6 +1485,26 @@ def _project_legacy_model_workbench_report(
     return projected
 
 
+def _project_legacy_v4_model_workbench_report(
+    report: dict[str, object],
+) -> dict[str, object]:
+    model = report.get("model")
+    if not isinstance(model, dict):
+        raise StageContractError("model workbench report projection is invalid")
+    identity = model.get("identity")
+    if (
+        not isinstance(identity, dict)
+        or identity.get("profile_id") != LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
+    ):
+        raise StageContractError("model workbench report projection is invalid")
+    projected = dict(report)
+    projected["format_version"] = LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION
+    projected_identity = dict(identity)
+    projected_identity["postprocess_algorithm"] = LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID
+    projected["model"] = {**model, "identity": projected_identity}
+    return projected
+
+
 def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
     try:
         run_dir = contained_run_path(run_dir.parent, run_dir.name, kind="directory")
@@ -1387,15 +1541,25 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
         persisted_version = persisted.get("format_version")
         if persisted_version not in {
             LEGACY_WORKBENCH_REPORT_FORMAT_VERSION,
+            LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION,
             WORKBENCH_REPORT_FORMAT_VERSION,
         }:
             raise StageContractError("persisted model workbench report format version is unsupported")
-        if (
-            persisted_version == LEGACY_WORKBENCH_REPORT_FORMAT_VERSION
-            and value.get("profile_id") == PROFILE_ID
-        ):
+        profile_id = value.get("profile_id")
+        supported_profiles = {
+            LEGACY_WORKBENCH_REPORT_FORMAT_VERSION: {
+                LEGACY_PROFILE_ID,
+                LEGACY_SOURCE_PRESERVE_PROFILE_ID,
+            },
+            LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION: {
+                LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+            },
+            WORKBENCH_REPORT_FORMAT_VERSION: {PROFILE_ID},
+        }
+        if profile_id not in supported_profiles[persisted_version]:
             raise StageContractError(
-                "persisted model workbench report format version 0.3.0 is unsupported for the active profile"
+                f"persisted model workbench report format version {persisted_version} "
+                "is unsupported for this profile"
             )
         if "normalization" in persisted:
             normalization, normalization_report = _load_normalization_evidence(run_dir)
@@ -1417,6 +1581,8 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
                     "persisted model workbench report format version 0.3.0 is unsupported for a non-historical profile"
                 )
             expected_persisted = _project_legacy_model_workbench_report(report)
+        elif persisted_version == LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION:
+            expected_persisted = _project_legacy_v4_model_workbench_report(report)
         else:
             expected_persisted = report
         if persisted != expected_persisted:

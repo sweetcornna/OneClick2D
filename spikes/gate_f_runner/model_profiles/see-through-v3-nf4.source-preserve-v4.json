@@ -1,7 +1,7 @@
 {
   "format": "oneclick2d.model-spike-profile",
   "format_version": "0.1.0",
-  "profile_id": "see-through.v3.nf4.1280.wsl2.source-preserve.v5",
+  "profile_id": "see-through.v3.nf4.1280.wsl2.source-preserve.v4",
   "code": {
     "repository": "https://github.com/shitagaki-lab/see-through.git",
     "commit": "58a1cb11d13f85acec9bbddb8cd4b6487843d4cf",
@@ -43,8 +43,8 @@
     }
   },
   "entrypoint": {
-    "path": "see_through_v3_nf4_source_preserve_v5.py",
-    "sha256": "8732db76c4fcf3f4bf7e94f3a206456ffbf9bd78ef773aa66d9b793c6f8f1ac5",
+    "path": "see_through_v3_nf4_source_preserve_v4.py",
+    "sha256": "ae4d26b042b8b15e7bdcfdacd11c50b16d97c1ccf19aad94162dd67046e1642f",
     "upstream_script": "inference/scripts/inference_psd_quantized.py",
     "device_policy": {
       "path": "nf4_marigold_device_policy.py",
