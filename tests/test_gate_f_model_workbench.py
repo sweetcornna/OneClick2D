@@ -40,9 +40,15 @@ from spikes.gate_f_runner.model_worker import (
     LEGACY_PROFILE_SHA256,
     LEGACY_SOURCE_PRESERVE_PROFILE_ID,
     LEGACY_SOURCE_PRESERVE_PROFILE_SHA256,
+    LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+    LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
+    LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     NF4_MARIGOLD_DEVICE_POLICY_ID,
     PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     PROFILE_ID,
+    PROFILE_ROOT,
+    _artifact_manifest,
+    _artifact_manifest_digest,
     _load_profile,
 )
 from spikes.gate_f_runner.runtime import canonical_json_bytes, read_bounded_file, sha256_bytes, sha256_file
@@ -154,6 +160,48 @@ LEGACY_V3_WORKBENCH_REPORT_V03_ZLIB_BASE64 = (
 )
 
 
+LEGACY_V4_WORKBENCH_REPORT_V04_ZLIB_BASE64 = (
+    "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"
+)
+
+
 def _legacy_workbench_report_v03_bytes(encoded: str) -> bytes:
     return zlib.decompress(base64.b64decode(encoded))
 
@@ -241,6 +289,10 @@ def write_model_fixture(run_dir: Path, source_sha256: str | None = None, *, publ
     ]
     profile, profile_bytes = _load_profile()
     main_psd = next(item for item in files if item["uri"] == "input/input.psd")
+    artifact_manifest = _artifact_manifest(
+        output / "input",
+        output / "input" / ".entrypoint-attestation.json",
+    )
     result = {
         "format": "oneclick2d.model-worker-result",
         "format_version": "0.1.0",
@@ -253,7 +305,10 @@ def write_model_fixture(run_dir: Path, source_sha256: str | None = None, *, publ
         "model_used": True,
         "oc2d_produced": False,
         "gate_f_status": "GATE_F_NOT_EVALUATED",
-        "entrypoint_attestation": _valid_entrypoint_attestation_summary(),
+        "entrypoint_attestation": _valid_entrypoint_attestation_summary(
+            source_sha256,
+            _artifact_manifest_digest(artifact_manifest),
+        ),
         "files": files,
         "psd": main_psd,
     }
@@ -262,7 +317,13 @@ def write_model_fixture(run_dir: Path, source_sha256: str | None = None, *, publ
     return result
 
 
-def refresh_model_inventory(run_dir: Path, result: dict[str, object], *, publish_result: bool = False) -> None:
+def refresh_model_inventory(
+    run_dir: Path,
+    result: dict[str, object],
+    *,
+    publish_result: bool = False,
+    refresh_attestation: bool = True,
+) -> None:
     output = run_dir / "model-output"
     files = [
         {
@@ -275,6 +336,15 @@ def refresh_model_inventory(run_dir: Path, result: dict[str, object], *, publish
     ]
     result["files"] = files
     result["psd"] = next(item for item in files if item["uri"] == "input/input.psd")
+    attestation = result.get("entrypoint_attestation")
+    if refresh_attestation and isinstance(attestation, dict) and isinstance(attestation.get("binding"), dict):
+        artifact_manifest = _artifact_manifest(
+            output / "input",
+            output / "input" / ".entrypoint-attestation.json",
+        )
+        attestation["binding"]["artifact_manifest_digest"] = _artifact_manifest_digest(
+            artifact_manifest
+        )
     if publish_result:
         (run_dir / "model-result.json").write_bytes(canonical_json_bytes(result))
 
@@ -393,7 +463,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             run_dir.mkdir()
             write_model_fixture(run_dir)
             report = load_model_workbench_report(run_dir)
-            self.assertEqual("0.4.0", report["format_version"])
+            self.assertEqual("0.5.0", report["format_version"])
             self.assertEqual("model", report["workflow"])
             self.assertTrue(report["model_used"])
             self.assertFalse(report["oc2d_produced"])
@@ -423,6 +493,14 @@ class GateFModelWorkbenchTests(unittest.TestCase):
                 PSD_PIXEL_PROJECTION_ALGORITHM_ID,
                 report["model"]["identity"]["entrypoint_attestation"]
                 ["psd_pixel_projection_algorithm_id"],
+            )
+            self.assertEqual(
+                report["model"]["source_sha256"],
+                report["model"]["identity"]["entrypoint_attestation"]["binding"]["source_sha256"],
+            )
+            self.assertNotIn(
+                "challenge",
+                report["model"]["identity"]["entrypoint_attestation"]["binding"],
             )
             self.assertEqual(24, report["model"]["semantic_intermediate_count"])
             self.assertEqual(23, report["model"]["depth_intermediate_count"])
@@ -506,7 +584,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
 
                 report = load_model_workbench_report(run_dir)
 
-                self.assertEqual("0.4.0", report["format_version"])
+                self.assertEqual("0.5.0", report["format_version"])
                 self.assertEqual(profile_id, report["model"]["identity"]["profile_id"])
                 self.assertEqual(algorithm, report["model"]["identity"]["postprocess_algorithm"])
                 self.assertEqual(
@@ -523,6 +601,53 @@ class GateFModelWorkbenchTests(unittest.TestCase):
                 ):
                     load_model_workbench_report(run_dir)
 
+    def test_loads_static_v04_persisted_report_for_historical_v4(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.persisted-v04-v4"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            result["profile_id"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
+            result["profile_sha256"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
+            result["dependencies_sha256"] = LEGACY_DEPENDENCIES_SHA256
+            result["entrypoint_attestation"].pop("binding")
+            (run_dir / "model-result.json").write_bytes(canonical_json_bytes(result))
+
+            persisted_bytes = _legacy_workbench_report_v03_bytes(
+                LEGACY_V4_WORKBENCH_REPORT_V04_ZLIB_BASE64
+            )
+            persisted = json.loads(persisted_bytes)
+            self.assertEqual("0.4.0", persisted["format_version"])
+            self.assertEqual(
+                LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+                persisted["model"]["identity"]["profile_id"],
+            )
+            self.assertIn("entrypoint_attestation", persisted["model"]["identity"])
+            self.assertNotIn(
+                "binding",
+                persisted["model"]["identity"]["entrypoint_attestation"],
+            )
+            self.assertEqual(
+                LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+                persisted["model"]["identity"]["postprocess_algorithm"],
+            )
+            self.assertEqual(31, persisted["quality"]["neutral_fidelity"]["alpha_threshold"])
+            (run_dir / "workbench-report.json").write_bytes(persisted_bytes)
+
+            report = load_model_workbench_report(run_dir)
+            self.assertEqual("0.5.0", report["format_version"])
+            self.assertEqual(
+                LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+                report["model"]["identity"]["profile_id"],
+            )
+
+            persisted["model_used"] = False
+            (run_dir / "workbench-report.json").write_bytes(canonical_json_bytes(persisted))
+            with self.assertRaisesRegex(
+                StageContractError,
+                "does not match validated evidence",
+            ):
+                load_model_workbench_report(run_dir)
+
     def test_rejects_v03_persisted_report_for_active_profile_as_unsupported_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory) / "run.persisted-v03-active"
@@ -534,7 +659,40 @@ class GateFModelWorkbenchTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 StageContractError,
-                "format version 0.3.0 is unsupported for the active profile",
+                "format version 0.3.0 is unsupported for this profile",
+            ):
+                load_model_workbench_report(run_dir)
+
+    def test_rejects_v04_persisted_report_for_active_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.persisted-v04-active"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir)
+            report = build_model_workbench_report(run_dir, run_dir.name, result)
+            report["format_version"] = "0.4.0"
+            (run_dir / "workbench-report.json").write_bytes(canonical_json_bytes(report))
+
+            with self.assertRaisesRegex(
+                StageContractError,
+                "format version 0.4.0 is unsupported for this profile",
+            ):
+                load_model_workbench_report(run_dir)
+
+    def test_rejects_v05_persisted_report_for_historical_v4_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.persisted-v05-v4"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            result["profile_id"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
+            result["profile_sha256"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
+            result["entrypoint_attestation"].pop("binding")
+            (run_dir / "model-result.json").write_bytes(canonical_json_bytes(result))
+            report = build_model_workbench_report(run_dir, run_dir.name, result)
+            (run_dir / "workbench-report.json").write_bytes(canonical_json_bytes(report))
+
+            with self.assertRaisesRegex(
+                StageContractError,
+                "format version 0.5.0 is unsupported for this profile",
             ):
                 load_model_workbench_report(run_dir)
 
@@ -589,6 +747,67 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             )
             self.assertEqual("review_required", report["quality"]["neutral_fidelity"]["status"])
 
+    def test_active_profile_tampered_attestation_source_binding_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.model-tampered-attestation-source"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            result["entrypoint_attestation"]["binding"]["source_sha256"] = "0" * 64
+
+            report = build_model_workbench_report(run_dir, run_dir.name, result)
+
+            self.assertFalse(report["model_used"])
+            self.assertIsNone(report["model"]["identity"]["entrypoint_attestation"])
+            self.assertEqual(
+                ["MODEL_ENTRYPOINT_ATTESTATION_MISMATCH"],
+                report["quality"]["reason_codes"],
+            )
+
+    def test_active_profile_manifest_binding_for_another_set_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run.model-tampered-attestation-manifest"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            other = root / "other-artifacts"
+            other.mkdir()
+            (other / "other.psd").write_bytes(b"different legal manifest")
+            other_manifest = _artifact_manifest(
+                other,
+                other / ".entrypoint-attestation.json",
+            )
+            result["entrypoint_attestation"]["binding"]["artifact_manifest_digest"] = (
+                _artifact_manifest_digest(other_manifest)
+            )
+
+            report = build_model_workbench_report(run_dir, run_dir.name, result)
+
+            self.assertFalse(report["model_used"])
+            self.assertIsNone(report["model"]["identity"]["entrypoint_attestation"])
+            self.assertEqual(
+                ["MODEL_ENTRYPOINT_ATTESTATION_MISMATCH"],
+                report["quality"]["reason_codes"],
+            )
+
+    def test_active_profile_retained_artifact_change_breaks_manifest_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.model-post-attestation-change"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            stats_path = run_dir / "model-output" / "input" / "input" / "stats.json"
+            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            stats["total_time_s"] = 14.0
+            stats_path.write_bytes(canonical_json_bytes(stats))
+            refresh_model_inventory(run_dir, result, refresh_attestation=False)
+
+            report = build_model_workbench_report(run_dir, run_dir.name, result)
+
+            self.assertFalse(report["model_used"])
+            self.assertEqual(
+                ["MODEL_ENTRYPOINT_ATTESTATION_MISMATCH"],
+                report["quality"]["reason_codes"],
+            )
+
     def test_non_active_profile_attestation_error_does_not_call_unknown_profile_legacy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory) / "run.model-unknown-profile-attestation"
@@ -626,7 +845,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
         from PIL import Image
 
         with tempfile.TemporaryDirectory() as directory:
-            run_dir = Path(directory) / "run.model-v4-alpha-threshold"
+            run_dir = Path(directory) / "run.model-v5-alpha-threshold"
             run_dir.mkdir()
             result = write_model_fixture(run_dir, publish_result=False)
             image_root = run_dir / "model-output" / "input" / "input"
@@ -642,6 +861,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             (run_dir / TRUSTED_MODEL_SOURCE_NAME).write_bytes(source_bytes)
             (image_root / "src_img.png").write_bytes(source_bytes)
             result["source_sha256"] = sha256_bytes(source_bytes)
+            result["entrypoint_attestation"]["binding"]["source_sha256"] = result["source_sha256"]
             refresh_model_inventory(run_dir, result)
 
             report = build_model_workbench_report(run_dir, run_dir.name, result)
@@ -714,6 +934,37 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             self.assertEqual(15, report["quality"]["neutral_fidelity"]["alpha_threshold"])
             self.assertEqual(
                 "legacy-workbench-constant.v1",
+                report["quality"]["neutral_fidelity"]["alpha_threshold_source"],
+            )
+
+    def test_imports_historical_v4_with_original_attestation_and_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.model-historical-v4"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            result["profile_id"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
+            result["profile_sha256"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
+            result["dependencies_sha256"] = LEGACY_DEPENDENCIES_SHA256
+            result["entrypoint_attestation"].pop("binding")
+
+            report = build_model_workbench_report(run_dir, run_dir.name, result)
+            identity = report["model"]["identity"]
+            archived_v4 = json.loads(
+                (PROFILE_ROOT / "see-through-v3-nf4.source-preserve-v4.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertEqual("0.5.0", report["format_version"])
+            self.assertEqual(LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID, identity["profile_id"])
+            self.assertEqual(
+                archived_v4["postprocess"]["algorithm_id"],
+                identity["postprocess_algorithm"],
+            )
+            self.assertNotIn("binding", identity["entrypoint_attestation"])
+            self.assertEqual(31, report["quality"]["neutral_fidelity"]["alpha_threshold"])
+            self.assertEqual(
+                "model-profile.postprocess.visible_alpha_threshold",
                 report["quality"]["neutral_fidelity"]["alpha_threshold_source"],
             )
 

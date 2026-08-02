@@ -43,12 +43,13 @@ from spikes.gate_f_runner.rendering import (
 from spikes.gate_f_runner.runtime import canonical_json_bytes
 from spikes.gate_f_runner.runtime import sha256_bytes
 from tests.test_gate_f_model_motion_draft import persist_trusted_model_source, write_sparse_motion_fixture
+from tests.test_gate_f_model_worker import _valid_entrypoint_attestation_summary
 from tests.test_gate_f_model_workbench import refresh_model_inventory
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-candidate" / "v0.1" / "report.schema.json"
-PREFLIGHT_REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-candidate" / "v0.1" / "preflight-report.schema.json"
+REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-candidate" / "v0.2" / "report.schema.json"
+PREFLIGHT_REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-candidate" / "v0.2" / "preflight-report.schema.json"
 
 
 def _json_schema_type_matches(value: object, expected: str) -> bool:
@@ -392,7 +393,7 @@ class GateFModelCandidateTests(unittest.TestCase):
             exposed.close()
             omission.close()
 
-    def test_v4_source_alpha_threshold_accepts_generated_rgb_only_through_31(self) -> None:
+    def test_v5_source_alpha_threshold_accepts_generated_rgb_only_through_31(self) -> None:
         from PIL import Image
 
         def prepare(run_dir: Path, *, mismatch_at_32: bool) -> tuple[list[tuple[int, int]], list[tuple[int, int, int]]]:
@@ -421,6 +422,9 @@ class GateFModelCandidateTests(unittest.TestCase):
                 trusted_source = persist_trusted_model_source(run_dir, source)
                 (image_root / "src_img.png").write_bytes(trusted_source)
                 result["source_sha256"] = sha256_bytes(trusted_source)
+                result["entrypoint_attestation"] = _valid_entrypoint_attestation_summary(
+                    result["source_sha256"]
+                )
                 mouth.save(image_root / "mouth.png", format="PNG")
             finally:
                 source.close()
@@ -691,6 +695,9 @@ class GateFModelCandidateTests(unittest.TestCase):
                 trusted_source = persist_trusted_model_source(run_dir, source)
                 (image_root / "src_img.png").write_bytes(trusted_source)
                 result["source_sha256"] = sha256_bytes(trusted_source)
+                result["entrypoint_attestation"] = _valid_entrypoint_attestation_summary(
+                    result["source_sha256"]
+                )
             finally:
                 source.close()
             refresh_model_inventory(run_dir, result, publish_result=True)

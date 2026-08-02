@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import functools
 import hashlib
@@ -22,16 +23,31 @@ from spikes.gate_f_runner.contracts import StageContractError
 from spikes.gate_f_runner.model_worker import (
     DEVICE_POLICY_PATH,
     ENTRYPOINT_ROOT,
+    LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256,
+    LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+    LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
+    LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID,
+    LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+    MAX_MODEL_ARTIFACT_MANIFEST_DEPTH,
+    MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES,
+    MAX_MODEL_ARTIFACT_MANIFEST_ENTRIES,
+    MAX_MODEL_ARTIFACT_MANIFEST_NODES,
+    MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES,
+    MAX_MODEL_RESULT_BYTES,
     MODEL_PART_NAMES,
     MODEL_SEMANTIC_NAMES,
     NF4_MARIGOLD_DEVICE_POLICY_ID,
     PROFILE_ID,
     PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+    _artifact_manifest,
     _consume_entrypoint_attestation,
+    _artifact_manifest_digest,
     _inventory,
     _invoke_wsl,
+    _legacy_v4_entrypoint_attestation_dict,
     _load_profile,
     _run_checked,
+    _validated_archived_entrypoint,
     _validated_entrypoint,
     _validated_postprocess,
     _verify_runtime,
@@ -46,6 +62,60 @@ from spikes.gate_f_runner.runtime import read_bounded_file
 PINNED_MODEL_ROOT = Path.home() / "oneclick2d-model-spikes" / "see-through"
 PINNED_MODEL_PYTHON = PINNED_MODEL_ROOT / ".venv" / "bin" / "python"
 V4_ENTRYPOINT = ENTRYPOINT_ROOT / "see_through_v3_nf4_source_preserve_v4.py"
+V5_ENTRYPOINT = ENTRYPOINT_ROOT / "see_through_v3_nf4_source_preserve_v5.py"
+V4_PROFILE = (
+    Path(__file__).parents[1]
+    / "spikes"
+    / "gate_f_runner"
+    / "model_profiles"
+    / "see-through-v3-nf4.source-preserve-v4.json"
+)
+ATTESTATION_CHALLENGE = "ab" * 32
+ATTESTATION_PSD_BYTES = b"attested-psd"
+
+
+def _v5_entrypoint_control_namespace() -> dict[str, object]:
+    tree = ast.parse(V5_ENTRYPOINT.read_text(encoding="utf-8"), filename=str(V5_ENTRYPOINT))
+    selected: list[ast.stmt] = []
+    function_names = {
+        "_write_entrypoint_attestation",
+        "_source_preserving_further_extr",
+        "main",
+    }
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+            if any(isinstance(target, ast.Name) and target.id == "_PSD_PROJECTION_EXECUTED" for target in targets):
+                selected.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in function_names:
+            selected.append(node)
+    namespace: dict[str, object] = {"Path": Path}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(V5_ENTRYPOINT), "exec"), namespace)
+    return namespace
+
+
+def _v5_entrypoint_manifest_namespace() -> dict[str, object]:
+    tree = ast.parse(V5_ENTRYPOINT.read_text(encoding="utf-8"), filename=str(V5_ENTRYPOINT))
+    selected: list[ast.stmt] = []
+    constant_names = {
+        "MAX_ARTIFACT_MANIFEST_BYTES",
+        "MAX_ARTIFACT_MANIFEST_ENTRIES",
+        "MAX_ARTIFACT_MANIFEST_DIRECTORIES",
+        "MAX_ARTIFACT_MANIFEST_NODES",
+        "MAX_ARTIFACT_MANIFEST_DEPTH",
+        "MAX_ARTIFACT_RELATIVE_PATH_BYTES",
+    }
+    function_names = {"_sha256_file", "_bounded_artifact_files", "_artifact_manifest"}
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+            if any(isinstance(target, ast.Name) and target.id in constant_names for target in targets):
+                selected.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in function_names:
+            selected.append(node)
+    namespace: dict[str, object] = {"Path": Path, "os": os, "hashlib": hashlib}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(V5_ENTRYPOINT), "exec"), namespace)
+    return namespace
 
 
 def _minimal_psd() -> bytes:
@@ -184,7 +254,22 @@ def _write_complete_model_output(output: Path) -> None:
     )
 
 
-def _valid_entrypoint_attestation() -> dict[str, object]:
+def _valid_entrypoint_attestation(
+    *,
+    challenge: str = ATTESTATION_CHALLENGE,
+    source_sha256: str | None = None,
+    artifact_manifest: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    if source_sha256 is None:
+        source_sha256 = hashlib.sha256(b"source").hexdigest()
+    if artifact_manifest is None:
+        artifact_manifest = [
+            {
+                "path": "result.psd",
+                "sha256": hashlib.sha256(ATTESTATION_PSD_BYTES).hexdigest(),
+                "byte_length": len(ATTESTATION_PSD_BYTES),
+            }
+        ]
     return {
         "format": "oneclick2d.model-entrypoint-attestation",
         "format_version": "0.1.0",
@@ -213,14 +298,59 @@ def _valid_entrypoint_attestation() -> dict[str, object]:
         },
         "psd_pixel_projection_algorithm_id": PSD_PIXEL_PROJECTION_ALGORITHM_ID,
         "psd_projection_verified": True,
+        "binding": {
+            "challenge": challenge,
+            "source_sha256": source_sha256,
+            "artifact_manifest_digest": _artifact_manifest_digest(artifact_manifest),
+            "artifact_manifest": artifact_manifest,
+        },
     }
 
 
-def _valid_entrypoint_attestation_summary() -> dict[str, object]:
-    value = _valid_entrypoint_attestation()
+def _valid_entrypoint_attestation_summary(
+    source_sha256: str | None = None,
+    artifact_manifest_digest: str | None = None,
+) -> dict[str, object]:
+    value = _valid_entrypoint_attestation(source_sha256=source_sha256)
     value.pop("format")
     value.pop("format_version")
+    binding = value["binding"]
+    if artifact_manifest_digest is not None:
+        binding["artifact_manifest_digest"] = artifact_manifest_digest
+    binding.pop("challenge")
+    binding.pop("artifact_manifest")
     return value
+
+
+def _published_entrypoint_attestation_summary(
+    output: Path,
+    source: Path,
+) -> dict[str, object]:
+    artifact_root = output / "input"
+    manifest = _artifact_manifest(
+        artifact_root,
+        artifact_root / ".entrypoint-attestation.json",
+    )
+    return _valid_entrypoint_attestation_summary(
+        hashlib.sha256(source.read_bytes()).hexdigest(),
+        _artifact_manifest_digest(manifest),
+    )
+
+
+def _write_entrypoint_attestation_fixture(
+    root: Path,
+    *,
+    challenge: str = ATTESTATION_CHALLENGE,
+) -> tuple[Path, Path, dict[str, object]]:
+    source = root / "source.png"
+    source.write_bytes(b"source")
+    artifact_root = root / "artifacts"
+    artifact_root.mkdir()
+    (artifact_root / "result.psd").write_bytes(ATTESTATION_PSD_BYTES)
+    attestation = _valid_entrypoint_attestation(challenge=challenge)
+    path = artifact_root / ".entrypoint-attestation.json"
+    path.write_text(json.dumps(attestation), encoding="utf-8")
+    return path, source, attestation
 
 
 def _unpack_packbits(data: bytes, expected_length: int) -> bytes:
@@ -378,6 +508,120 @@ def _write_source_projection_fixture(directory: Path) -> None:
 
 
 class GateFModelWorkerTests(unittest.TestCase):
+    def test_v5_entrypoint_attests_only_after_upstream_cleanup_returns(self) -> None:
+        namespace = _v5_entrypoint_control_namespace()
+        events: list[str] = []
+        namespace["install_patches"] = lambda: events.append("install")
+        namespace["UPSTREAM_SCRIPT"] = Path("upstream.py")
+        fake_sys = mock.Mock(argv=["entrypoint.py", "--save_dir", "output"])
+        namespace["sys"] = fake_sys
+        namespace["os"] = mock.Mock(
+            environ={"ONECLICK2D_ATTESTATION_SOURCE": "/mnt/d/private-source.png"}
+        )
+        runpy_module = mock.Mock()
+
+        def run_path(*args, **kwargs):
+            del args, kwargs
+            events.append("upstream-returned")
+            namespace["_PSD_PROJECTION_EXECUTED"] = True
+
+        runpy_module.run_path.side_effect = run_path
+        namespace["runpy"] = runpy_module
+        namespace["_write_entrypoint_attestation"] = lambda: events.append("attested")
+
+        namespace["main"]()
+
+        self.assertEqual(["install", "upstream-returned", "attested"], events)
+        self.assertEqual(
+            [
+                "upstream.py",
+                "--srcp",
+                "/mnt/d/private-source.png",
+                "--save_dir",
+                "output",
+            ],
+            fake_sys.argv,
+        )
+
+    def test_v5_entrypoint_attests_after_successful_system_exit(self) -> None:
+        for exit_code in (0, None):
+            with self.subTest(exit_code=exit_code):
+                namespace = _v5_entrypoint_control_namespace()
+                namespace["install_patches"] = mock.Mock()
+                namespace["UPSTREAM_SCRIPT"] = Path("upstream.py")
+                namespace["sys"] = mock.Mock(argv=["entrypoint.py"])
+                namespace["os"] = mock.Mock(
+                    environ={"ONECLICK2D_ATTESTATION_SOURCE": "/mnt/d/private-source.png"}
+                )
+                writer = mock.Mock()
+                namespace["_write_entrypoint_attestation"] = writer
+                runpy_module = mock.Mock()
+
+                def successful_exit(*args, **kwargs):
+                    del args, kwargs
+                    namespace["_PSD_PROJECTION_EXECUTED"] = True
+                    raise SystemExit(exit_code)
+
+                runpy_module.run_path.side_effect = successful_exit
+                namespace["runpy"] = runpy_module
+
+                with self.assertRaises(SystemExit) as raised:
+                    namespace["main"]()
+                self.assertEqual(exit_code, raised.exception.code)
+                writer.assert_called_once_with()
+
+    def test_v5_entrypoint_does_not_attest_after_nonzero_system_exit(self) -> None:
+        namespace = _v5_entrypoint_control_namespace()
+        namespace["install_patches"] = mock.Mock()
+        namespace["UPSTREAM_SCRIPT"] = Path("upstream.py")
+        namespace["sys"] = mock.Mock(argv=["entrypoint.py"])
+        namespace["os"] = mock.Mock(
+            environ={"ONECLICK2D_ATTESTATION_SOURCE": "/mnt/d/private-source.png"}
+        )
+        writer = mock.Mock()
+        namespace["_write_entrypoint_attestation"] = writer
+        runpy_module = mock.Mock()
+
+        def failed_exit(*args, **kwargs):
+            del args, kwargs
+            namespace["_PSD_PROJECTION_EXECUTED"] = True
+            raise SystemExit(7)
+
+        runpy_module.run_path.side_effect = failed_exit
+        namespace["runpy"] = runpy_module
+
+        with self.assertRaises(SystemExit) as raised:
+            namespace["main"]()
+        self.assertEqual(7, raised.exception.code)
+        writer.assert_not_called()
+
+    def test_v5_entrypoint_refuses_attestation_without_psd_projection(self) -> None:
+        namespace = _v5_entrypoint_control_namespace()
+        namespace["_PSD_PROJECTION_EXECUTED"] = False
+        with self.assertRaisesRegex(RuntimeError, "projection did not complete"):
+            namespace["_write_entrypoint_attestation"]()
+
+    def test_v5_further_extraction_marks_projection_without_early_attestation(self) -> None:
+        namespace = _v5_entrypoint_control_namespace()
+        events: list[str] = []
+        namespace["_source_preserve_visible_pixels"] = lambda path: events.append("source")
+        namespace["_ORIGINAL_FURTHER_EXTR"] = lambda *args, **kwargs: events.append("upstream") or "ok"
+        namespace["_project_postprocessed_pixels_into_psd"] = lambda path: events.append("projection")
+        namespace["_MARIGOLD_ADAPTER"] = object()
+        namespace["_write_entrypoint_attestation"] = mock.Mock()
+
+        result = namespace["_source_preserving_further_extr"](
+            "artifacts",
+            rotate=False,
+            save_to_psd=True,
+            tblr_split=False,
+        )
+
+        self.assertEqual("ok", result)
+        self.assertEqual(["source", "upstream", "projection"], events)
+        self.assertTrue(namespace["_PSD_PROJECTION_EXECUTED"])
+        namespace["_write_entrypoint_attestation"].assert_not_called()
+
     def test_profiles_have_pinned_safe_weight_artifacts(self) -> None:
         profile, exact = _load_profile()
         self.assertEqual(PROFILE_ID, profile["profile_id"])
@@ -428,6 +672,23 @@ class GateFModelWorkerTests(unittest.TestCase):
         entrypoint_path = ENTRYPOINT_ROOT / entrypoint["path"]
         self.assertEqual(entrypoint["sha256"], hashlib.sha256(entrypoint_path.read_bytes()).hexdigest())
 
+    def test_v4_archive_and_entrypoint_have_verifiable_preimages(self) -> None:
+        archived = V4_PROFILE.read_bytes()
+        profile = json.loads(archived)
+        self.assertEqual(LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID, profile["profile_id"])
+        self.assertEqual(
+            LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
+            hashlib.sha256(archived).hexdigest(),
+        )
+        self.assertEqual(
+            LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256,
+            hashlib.sha256(V4_ENTRYPOINT.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256,
+            profile["entrypoint"]["sha256"],
+        )
+
     def test_profile_attests_device_policy_digest(self) -> None:
         profile, _ = _load_profile()
         device_policy = profile["entrypoint"]["device_policy"]
@@ -468,6 +729,195 @@ class GateFModelWorkerTests(unittest.TestCase):
                 self.skipTest("symlinks are unavailable")
             with self.assertRaises(StageContractError):
                 _inventory(root)
+
+    def test_artifact_manifest_rejects_entry_count_over_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            for index in range(MAX_MODEL_ARTIFACT_MANIFEST_ENTRIES):
+                (root / f"artifact-{index:03d}.bin").write_bytes(b"")
+            with self.assertRaisesRegex(StageContractError, "entry count exceeded"):
+                _artifact_manifest(root, root / ".entrypoint-attestation.json")
+
+    def test_artifact_manifest_rejects_cumulative_bytes_before_reading_excess(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"p")
+            excess = root / "999-excess.bin"
+            with excess.open("wb") as stream:
+                stream.truncate(MAX_MODEL_RESULT_BYTES)
+            real_read = read_bounded_file
+
+            def guarded_read(path: Path, maximum: int = MAX_MODEL_RESULT_BYTES) -> bytes:
+                if path == excess:
+                    self.fail("cumulative bound must reject the excess file before reading it")
+                return real_read(path, maximum)
+
+            with mock.patch(
+                "spikes.gate_f_runner.model_worker.read_bounded_file",
+                side_effect=guarded_read,
+            ):
+                with self.assertRaisesRegex(StageContractError, "byte count exceeded"):
+                    _artifact_manifest(root, root / ".entrypoint-attestation.json")
+
+    def _assert_manifest_traversal_rejects(self, root: Path, pattern: str) -> None:
+        with mock.patch(
+            "spikes.gate_f_runner.model_worker.read_bounded_file",
+            side_effect=lambda *args, **kwargs: self.fail(
+                "traversal bounds must reject before any file is read"
+            ),
+        ):
+            with self.assertRaisesRegex(StageContractError, pattern):
+                _artifact_manifest(root, root / ".entrypoint-attestation.json")
+
+    def test_artifact_manifest_rejects_depth_over_bound_during_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            nested = root
+            for level in range(MAX_MODEL_ARTIFACT_MANIFEST_DEPTH + 1):
+                nested = nested / f"level-{level}"
+            nested.mkdir(parents=True)
+            self._assert_manifest_traversal_rejects(root, "depth exceeded")
+
+    def test_artifact_manifest_rejects_directory_count_over_bound_during_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            for index in range(MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES + 1):
+                (root / f"group-{index:03d}").mkdir()
+            self._assert_manifest_traversal_rejects(root, "directory count exceeded")
+
+    def test_artifact_manifest_rejects_relative_path_over_bound_during_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            inner = root / ("a" * 200) / ("b" * 200)
+            inner.mkdir(parents=True)
+            (inner / ("c" * 200)).write_bytes(b"")
+            self._assert_manifest_traversal_rejects(root, "path length exceeded")
+
+    def test_artifact_manifest_rejects_node_count_over_bound_during_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            (root / "001-extra.bin").write_bytes(b"")
+            (root / "002-extra.bin").write_bytes(b"")
+            with mock.patch("spikes.gate_f_runner.model_worker.MAX_MODEL_ARTIFACT_MANIFEST_NODES", 2):
+                self._assert_manifest_traversal_rejects(root, "node count exceeded")
+
+    def test_artifact_manifest_excludes_attestation_from_traversal_node_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            (root / "001-extra.bin").write_bytes(b"extra")
+            attestation = root / ".entrypoint-attestation.json"
+            attestation.write_bytes(b"{}")
+            with mock.patch("spikes.gate_f_runner.model_worker.MAX_MODEL_ARTIFACT_MANIFEST_NODES", 2):
+                manifest = _artifact_manifest(root, attestation)
+        self.assertEqual(
+            ["000-result.psd", "001-extra.bin"],
+            [item["path"] for item in manifest],
+        )
+
+    def test_v5_entrypoint_manifest_bounds_match_worker_rules(self) -> None:
+        namespace = _v5_entrypoint_manifest_namespace()
+        self.assertEqual(MAX_MODEL_RESULT_BYTES, namespace["MAX_ARTIFACT_MANIFEST_BYTES"])
+        self.assertEqual(MAX_MODEL_ARTIFACT_MANIFEST_ENTRIES, namespace["MAX_ARTIFACT_MANIFEST_ENTRIES"])
+        self.assertEqual(
+            MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES,
+            namespace["MAX_ARTIFACT_MANIFEST_DIRECTORIES"],
+        )
+        self.assertEqual(MAX_MODEL_ARTIFACT_MANIFEST_NODES, namespace["MAX_ARTIFACT_MANIFEST_NODES"])
+        self.assertEqual(MAX_MODEL_ARTIFACT_MANIFEST_DEPTH, namespace["MAX_ARTIFACT_MANIFEST_DEPTH"])
+        self.assertEqual(
+            MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES,
+            namespace["MAX_ARTIFACT_RELATIVE_PATH_BYTES"],
+        )
+
+    def test_v5_entrypoint_manifest_rejects_traversal_bounds_like_worker(self) -> None:
+        bounded = _v5_entrypoint_manifest_namespace()["_bounded_artifact_files"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root
+            for level in range(MAX_MODEL_ARTIFACT_MANIFEST_DEPTH + 1):
+                nested = nested / f"level-{level}"
+            nested.mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeError, "depth exceeded"):
+                bounded(root)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES + 1):
+                (root / f"group-{index:03d}").mkdir()
+            with self.assertRaisesRegex(RuntimeError, "directory count exceeded"):
+                bounded(root)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inner = root / ("a" * 200) / ("b" * 200)
+            inner.mkdir(parents=True)
+            (inner / ("c" * 200)).write_bytes(b"")
+            with self.assertRaisesRegex(RuntimeError, "path length exceeded"):
+                bounded(root)
+
+    def test_v5_entrypoint_manifest_excludes_attestation_from_node_bound(self) -> None:
+        namespace = _v5_entrypoint_manifest_namespace()
+        namespace["MAX_ARTIFACT_MANIFEST_NODES"] = 2
+        entrypoint_manifest = namespace["_artifact_manifest"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            (root / "001-extra.bin").write_bytes(b"extra")
+            attestation = root / ".entrypoint-attestation.json"
+            attestation.write_bytes(b"{}")
+            manifest = entrypoint_manifest(root, attestation)
+        self.assertEqual(
+            ["000-result.psd", "001-extra.bin"],
+            [item["path"] for item in manifest],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            (root / "001-extra.bin").write_bytes(b"")
+            (root / "002-extra.bin").write_bytes(b"")
+            with self.assertRaisesRegex(RuntimeError, "node count exceeded"):
+                entrypoint_manifest(root, root / ".entrypoint-attestation.json")
+
+    def test_v5_entrypoint_manifest_enforces_entry_and_byte_bounds(self) -> None:
+        namespace = _v5_entrypoint_manifest_namespace()
+        entrypoint_manifest = namespace["_artifact_manifest"]
+        namespace["MAX_ARTIFACT_MANIFEST_ENTRIES"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            (root / "001-extra.bin").write_bytes(b"")
+            with self.assertRaisesRegex(RuntimeError, "entry count exceeded"):
+                entrypoint_manifest(root, root / ".entrypoint-attestation.json")
+        namespace["MAX_ARTIFACT_MANIFEST_ENTRIES"] = 256
+        namespace["MAX_ARTIFACT_MANIFEST_BYTES"] = 4
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(b"psd")
+            (root / "001-extra.bin").write_bytes(b"over")
+            with self.assertRaisesRegex(RuntimeError, "byte count exceeded"):
+                entrypoint_manifest(root, root / ".entrypoint-attestation.json")
+
+    def test_legacy_v4_verification_is_independent_of_active_policy_identity(self) -> None:
+        profile = json.loads(V4_PROFILE.read_bytes())
+        summary = _valid_entrypoint_attestation_summary()
+        summary.pop("binding")
+        with mock.patch.multiple(
+            "spikes.gate_f_runner.model_worker",
+            DEVICE_POLICY_PATH=ENTRYPOINT_ROOT / "renamed-active-policy.py",
+            NF4_MARIGOLD_DEVICE_POLICY_ID="see-through.v6.renamed-policy.v1",
+            PSD_PIXEL_PROJECTION_ALGORITHM_ID="renamed-algorithm.v1",
+        ):
+            self.assertEqual(V4_ENTRYPOINT, _validated_archived_entrypoint(profile))
+            attestation = _legacy_v4_entrypoint_attestation_dict(summary)
+        self.assertEqual(LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID, attestation["policy_id"])
+        self.assertEqual(
+            LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+            attestation["psd_pixel_projection_algorithm_id"],
+        )
 
     def test_checked_command_sanitizes_timeouts(self) -> None:
         process = mock.Mock()
@@ -530,9 +980,12 @@ class GateFModelWorkerTests(unittest.TestCase):
 
     def test_entrypoint_attestation_records_effective_offload_devices(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "attestation.json"
-            path.write_text(json.dumps(_valid_entrypoint_attestation()), encoding="utf-8")
-            summary = _consume_entrypoint_attestation(path)
+            path, source, _ = _write_entrypoint_attestation_fixture(Path(directory))
+            summary = _consume_entrypoint_attestation(
+                path,
+                expected_challenge=ATTESTATION_CHALLENGE,
+                source=source,
+            )
             self.assertFalse(path.exists())
             self.assertEqual(NF4_MARIGOLD_DEVICE_POLICY_ID, summary["policy_id"])
             self.assertEqual("cuda:0", summary["execution_device"])
@@ -545,30 +998,41 @@ class GateFModelWorkerTests(unittest.TestCase):
                 PSD_PIXEL_PROJECTION_ALGORITHM_ID,
                 summary["psd_pixel_projection_algorithm_id"],
             )
+            self.assertEqual(hashlib.sha256(b"source").hexdigest(), summary["binding"]["source_sha256"])
+            self.assertNotIn("challenge", summary["binding"])
+            self.assertNotIn("artifact_manifest", summary["binding"])
             with self.assertRaises(TypeError):
                 summary["policy_id"] = "changed"
             with self.assertRaises(TypeError):
                 summary["components"]["vae"]["disposition"] = "changed"
+            with self.assertRaises(TypeError):
+                summary["binding"]["source_sha256"] = "changed"
 
     def test_entrypoint_attestation_rejects_missing_required_field(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "attestation.json"
-            attestation = _valid_entrypoint_attestation()
+            path, source, attestation = _write_entrypoint_attestation_fixture(Path(directory))
             del attestation["psd_pixel_projection_algorithm_id"]
             path.write_text(json.dumps(attestation), encoding="utf-8")
             with self.assertRaisesRegex(StageContractError, "entrypoint attestation is invalid"):
-                _consume_entrypoint_attestation(path)
+                _consume_entrypoint_attestation(
+                    path,
+                    expected_challenge=ATTESTATION_CHALLENGE,
+                    source=source,
+                )
             self.assertFalse(path.exists())
 
     def test_entrypoint_attestation_rejects_all_cuda_components(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "attestation.json"
-            attestation = _valid_entrypoint_attestation()
+            path, source, attestation = _write_entrypoint_attestation_fixture(Path(directory))
             attestation["components"]["vae"]["storage_devices"] = ["cuda:0"]
             attestation["components"]["vae"]["execution_hook_devices"] = []
             path.write_text(json.dumps(attestation), encoding="utf-8")
             with self.assertRaisesRegex(StageContractError, "device attestation"):
-                _consume_entrypoint_attestation(path)
+                _consume_entrypoint_attestation(
+                    path,
+                    expected_challenge=ATTESTATION_CHALLENGE,
+                    source=source,
+                )
             self.assertFalse(path.exists())
 
     def test_entrypoint_attestation_rejects_component_devices_not_equal_to_execution_device(self) -> None:
@@ -583,13 +1047,82 @@ class GateFModelWorkerTests(unittest.TestCase):
         for component, field, devices in cases:
             with self.subTest(component=component, field=field, devices=devices):
                 with tempfile.TemporaryDirectory() as directory:
-                    path = Path(directory) / "attestation.json"
-                    attestation = _valid_entrypoint_attestation()
+                    path, source, attestation = _write_entrypoint_attestation_fixture(Path(directory))
                     attestation["components"][component][field] = devices
                     path.write_text(json.dumps(attestation), encoding="utf-8")
                     with self.assertRaisesRegex(StageContractError, "device attestation"):
-                        _consume_entrypoint_attestation(path)
+                        _consume_entrypoint_attestation(
+                            path,
+                            expected_challenge=ATTESTATION_CHALLENGE,
+                            source=source,
+                        )
                     self.assertFalse(path.exists())
+
+    def test_entrypoint_attestation_rejects_challenge_mismatch_without_echoing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path, source, _ = _write_entrypoint_attestation_fixture(Path(directory))
+            with self.assertRaises(StageContractError) as raised:
+                _consume_entrypoint_attestation(
+                    path,
+                    expected_challenge="cd" * 32,
+                    source=source,
+                )
+            self.assertEqual("model entrypoint attestation challenge mismatch", str(raised.exception))
+            self.assertNotIn(ATTESTATION_CHALLENGE, str(raised.exception))
+            self.assertFalse(path.exists())
+
+    def test_entrypoint_attestation_rejects_source_digest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path, source, _ = _write_entrypoint_attestation_fixture(Path(directory))
+            source.write_bytes(b"changed source")
+            with self.assertRaisesRegex(StageContractError, "source digest mismatch"):
+                _consume_entrypoint_attestation(
+                    path,
+                    expected_challenge=ATTESTATION_CHALLENGE,
+                    source=source,
+                )
+            self.assertFalse(path.exists())
+
+    def test_entrypoint_attestation_rejects_post_attestation_artifact_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path, source, _ = _write_entrypoint_attestation_fixture(Path(directory))
+            (path.parent / "late-write.bin").write_bytes(b"written after further_extr returned")
+            with self.assertRaisesRegex(
+                StageContractError,
+                "artifact manifest changed after entrypoint attestation",
+            ):
+                _consume_entrypoint_attestation(
+                    path,
+                    expected_challenge=ATTESTATION_CHALLENGE,
+                    source=source,
+                )
+            self.assertFalse(path.exists())
+
+    def test_entrypoint_attestation_rejects_artifact_manifest_digest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path, source, attestation = _write_entrypoint_attestation_fixture(Path(directory))
+            attestation["binding"]["artifact_manifest_digest"] = "0" * 64
+            path.write_text(json.dumps(attestation), encoding="utf-8")
+            with self.assertRaisesRegex(StageContractError, "artifact manifest digest mismatch"):
+                _consume_entrypoint_attestation(
+                    path,
+                    expected_challenge=ATTESTATION_CHALLENGE,
+                    source=source,
+                )
+            self.assertFalse(path.exists())
+
+    def test_entrypoint_attestation_rejects_open_binding_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path, source, attestation = _write_entrypoint_attestation_fixture(Path(directory))
+            attestation["binding"]["unexpected"] = True
+            path.write_text(json.dumps(attestation), encoding="utf-8")
+            with self.assertRaisesRegex(StageContractError, "attestation binding is invalid"):
+                _consume_entrypoint_attestation(
+                    path,
+                    expected_challenge=ATTESTATION_CHALLENGE,
+                    source=source,
+                )
+            self.assertFalse(path.exists())
 
     def test_nf4_marigold_policy_never_places_all_components_on_cuda(self) -> None:
         timeline: list[tuple[str, str, str]] = []
@@ -715,31 +1248,97 @@ class GateFModelWorkerTests(unittest.TestCase):
 
     def test_wsl_invocation_forces_offline_pinned_model_paths(self) -> None:
         profile, _ = _load_profile()
-        calls = []
+        calls: list[tuple[list[str], dict[str, str] | None]] = []
 
         def completed(command, **kwargs):
-            calls.append(command)
+            calls.append((command, kwargs.get("env")))
             if "wslpath" in command:
                 return mock.Mock(returncode=0, stdout=b"/mnt/d/model-spike\n", stderr=b"")
             return mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "spikes.gate_f_runner.model_worker._verify_wsl_models"
-        ), mock.patch("spikes.gate_f_runner.model_worker._consume_entrypoint_attestation"), mock.patch(
+        ), mock.patch(
+            "spikes.gate_f_runner.model_worker.secrets.token_hex",
+            return_value="cd" * 32,
+        ) as token_hex, mock.patch(
+            "spikes.gate_f_runner.model_worker._consume_entrypoint_attestation"
+        ) as consume, mock.patch(
             "spikes.gate_f_runner.model_worker._run_checked", side_effect=completed
         ):
             root = Path(directory)
+            (root / "source.png").write_bytes(b"source")
             (root / "output").mkdir()
             _invoke_wsl(root / "source.png", root / "output", profile, 30)
-        command = calls[-1]
+        command, process_env = calls[-1]
+        self.assertIsNotNone(process_env)
+        token_hex.assert_called_once_with(32)
         self.assertIn("HF_HUB_OFFLINE=1", command)
         self.assertIn("TRANSFORMERS_OFFLINE=1", command)
-        self.assertIn("ONECLICK2D_ENTRYPOINT_ATTESTATION=/mnt/d/model-spike/.entrypoint-attestation.json", command)
+        self.assertFalse(any(item.startswith("ONECLICK2D_ENTRYPOINT_ATTESTATION=") for item in command))
+        self.assertFalse(any(item.startswith("ONECLICK2D_ATTESTATION_CHALLENGE=") for item in command))
+        self.assertFalse(any(item.startswith("ONECLICK2D_ATTESTATION_SOURCE=") for item in command))
+        self.assertNotIn("--srcp", command)
+        self.assertNotIn("cd" * 32, " ".join(command))
+        self.assertEqual(
+            "/mnt/d/model-spike/.entrypoint-attestation.json",
+            process_env["ONECLICK2D_ENTRYPOINT_ATTESTATION"],
+        )
+        self.assertEqual("cd" * 32, process_env["ONECLICK2D_ATTESTATION_CHALLENGE"])
+        self.assertEqual("/mnt/d/model-spike", process_env["ONECLICK2D_ATTESTATION_SOURCE"])
+        self.assertTrue(
+            {
+                "ONECLICK2D_ENTRYPOINT_ATTESTATION",
+                "ONECLICK2D_ATTESTATION_CHALLENGE",
+                "ONECLICK2D_ATTESTATION_SOURCE",
+            }.issubset(set(process_env["WSLENV"].split(":")))
+        )
         self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", command)
         self.assertIn("--cpu_offload", command)
         self.assertIn("--no_group_offload", command)
         self.assertIn("models/seethroughv0.0.2_layerdiff3d_nf4", command)
         self.assertIn("models/seethroughv0.0.1_marigold_nf4", command)
+        consume.assert_called_once_with(
+            Path(directory) / "output" / "input" / ".entrypoint-attestation.json",
+            expected_challenge="cd" * 32,
+            source=Path(directory) / "source.png",
+        )
+
+    def test_wsl_invocations_never_reuse_attestation_challenges(self) -> None:
+        profile, _ = _load_profile()
+        commands: list[list[str]] = []
+        environments: list[dict[str, str]] = []
+
+        def completed(command, **kwargs):
+            if "wslpath" in command:
+                return mock.Mock(returncode=0, stdout=b"/mnt/d/model-spike\n", stderr=b"")
+            commands.append(command)
+            environments.append(kwargs["env"])
+            return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "spikes.gate_f_runner.model_worker._verify_wsl_models"
+        ), mock.patch(
+            "spikes.gate_f_runner.model_worker.secrets.token_hex",
+            side_effect=("11" * 32, "22" * 32),
+        ) as token_hex, mock.patch(
+            "spikes.gate_f_runner.model_worker._consume_entrypoint_attestation"
+        ), mock.patch(
+            "spikes.gate_f_runner.model_worker._run_checked",
+            side_effect=completed,
+        ):
+            root = Path(directory)
+            source = root / "source.png"
+            source.write_bytes(b"source")
+            for name in ("first", "second"):
+                output = root / name
+                output.mkdir()
+                _invoke_wsl(source, output, profile, 30)
+        self.assertEqual(2, token_hex.call_count)
+        self.assertNotIn("11" * 32, " ".join(commands[0]))
+        self.assertNotIn("22" * 32, " ".join(commands[1]))
+        self.assertEqual("11" * 32, environments[0]["ONECLICK2D_ATTESTATION_CHALLENGE"])
+        self.assertEqual("22" * 32, environments[1]["ONECLICK2D_ATTESTATION_CHALLENGE"])
 
     def test_model_cli_sanitizes_timeout_and_removes_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -786,7 +1385,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 _write_complete_model_output(output_path)
                 return (
                     mock.Mock(returncode=0, stdout=b"", stderr=b""),
-                    _valid_entrypoint_attestation_summary(),
+                    _published_entrypoint_attestation_summary(output_path, source_path),
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
@@ -801,6 +1400,109 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 PSD_PIXEL_PROJECTION_ALGORITHM_ID,
                 report["entrypoint_attestation"]["psd_pixel_projection_algorithm_id"],
             )
+            self.assertEqual(
+                hashlib.sha256(b"source").hexdigest(),
+                report["entrypoint_attestation"]["binding"]["source_sha256"],
+            )
+            self.assertEqual(
+                {"source_sha256", "artifact_manifest_digest"},
+                set(report["entrypoint_attestation"]["binding"]),
+            )
+            published_manifest = _artifact_manifest(
+                output / "input",
+                output / "input" / ".entrypoint-attestation.json",
+            )
+            self.assertEqual(
+                _artifact_manifest_digest(published_manifest),
+                report["entrypoint_attestation"]["binding"]["artifact_manifest_digest"],
+            )
+
+    def test_worker_rejects_manifest_digest_for_another_legal_artifact_set(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            source.write_bytes(b"source")
+            output = root / "output"
+            other = root / "other"
+            other.mkdir()
+            (other / "other.psd").write_bytes(b"other artifact set")
+            other_digest = _artifact_manifest_digest(
+                _artifact_manifest(other, other / ".entrypoint-attestation.json")
+            )
+
+            def invoke(source_path, output_path, profile, timeout_seconds):
+                _write_complete_model_output(output_path)
+                return (
+                    mock.Mock(returncode=0, stdout=b"", stderr=b""),
+                    _valid_entrypoint_attestation_summary(
+                        hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                        other_digest,
+                    ),
+                )
+
+            with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
+                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+            ):
+                with self.assertRaisesRegex(
+                    StageContractError,
+                    "published artifact manifest digest mismatch",
+                ):
+                    run_model_worker(source, output, timeout_seconds=30)
+
+    def test_worker_rejects_artifact_changed_after_attestation_consumption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            source.write_bytes(b"source")
+            output = root / "output"
+
+            def invoke(source_path, output_path, profile, timeout_seconds):
+                _write_complete_model_output(output_path)
+                return (
+                    mock.Mock(returncode=0, stdout=b"", stderr=b""),
+                    _published_entrypoint_attestation_summary(output_path, source_path),
+                )
+
+            def inventory_after_mutation(directory_path: Path):
+                stats_path = directory_path / "input" / "input" / "stats.json"
+                stats = json.loads(stats_path.read_text(encoding="utf-8"))
+                stats["total_time_s"] = 14.0
+                stats_path.write_text(json.dumps(stats, separators=(",", ":")), encoding="utf-8")
+                return _inventory(directory_path)
+
+            with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
+                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+            ), mock.patch(
+                "spikes.gate_f_runner.model_worker._inventory",
+                side_effect=inventory_after_mutation,
+            ):
+                with self.assertRaisesRegex(
+                    StageContractError,
+                    "published artifact manifest digest mismatch",
+                ):
+                    run_model_worker(source, output, timeout_seconds=30)
+
+    def test_worker_rejects_entrypoint_source_binding_mismatch_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            source.write_bytes(b"source")
+            output = root / "output"
+
+            def invoke(source_path, output_path, profile, timeout_seconds):
+                _write_complete_model_output(output_path)
+                summary = _published_entrypoint_attestation_summary(output_path, source_path)
+                summary["binding"]["source_sha256"] = "0" * 64
+                return mock.Mock(returncode=0, stdout=b"", stderr=b""), summary
+
+            with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
+                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+            ):
+                with self.assertRaisesRegex(
+                    StageContractError,
+                    "source binding does not match",
+                ):
+                    run_model_worker(source, output, timeout_seconds=30)
 
     def test_worker_rejects_successful_process_with_partial_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -815,7 +1517,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 (result_root / "input.psd").write_bytes(_minimal_psd())
                 return (
                     mock.Mock(returncode=0, stdout=b"", stderr=b""),
-                    _valid_entrypoint_attestation_summary(),
+                    _published_entrypoint_attestation_summary(output_path, source_path),
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
@@ -838,7 +1540,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 info.write_text(json.dumps(changed, separators=(",", ":")), encoding="utf-8")
                 return (
                     mock.Mock(returncode=0, stdout=b"", stderr=b""),
-                    _valid_entrypoint_attestation_summary(),
+                    _published_entrypoint_attestation_summary(output_path, source_path),
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
@@ -859,7 +1561,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 (output_path / "input" / "input.psd").write_bytes(b"8BPSmodel")
                 return (
                     mock.Mock(returncode=0, stdout=b"", stderr=b""),
-                    _valid_entrypoint_attestation_summary(),
+                    _published_entrypoint_attestation_summary(output_path, source_path),
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
@@ -880,7 +1582,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 (output_path / "input" / "input_depth.psd").write_bytes(b"8BPSdepth")
                 return (
                     mock.Mock(returncode=0, stdout=b"", stderr=b""),
-                    _valid_entrypoint_attestation_summary(),
+                    _published_entrypoint_attestation_summary(output_path, source_path),
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
@@ -904,7 +1606,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 metadata_path.write_text(json.dumps(metadata, separators=(",", ":")), encoding="utf-8")
                 return (
                     mock.Mock(returncode=0, stdout=b"", stderr=b""),
-                    _valid_entrypoint_attestation_summary(),
+                    _published_entrypoint_attestation_summary(output_path, source_path),
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(

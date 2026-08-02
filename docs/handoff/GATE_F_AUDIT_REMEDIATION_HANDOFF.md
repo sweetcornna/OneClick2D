@@ -79,8 +79,8 @@
 - **F1** [高] `model` CLI 无法产出可激活运行：workbench 信任硬化后校验要求 `trusted-model-source.png`，但 CLI 路径从不生成它——文档化的 `model → motion → model-candidate` 工作流必然在第一步后中断。→ CLI 复用 upload 路径的受信源生成逻辑，在 worker 调用前发布该文件，补端到端命令链回归。
   （本次交接已独立确认：`run_normalized_model_workbench()` 在调用 worker 前 `_publish_bytes(trusted_source_path, ...)`，GUI 与 CLI 共用该函数——见 `spikes/gate_f_runner/model_workbench.py:1309`。）
 - **F2** [中] acceptance 验证有 37.5 GiB 内存耗尽面：重算比对前把全部产物读进内存，74 个 PNG 每个可声明 512 MiB 且无总量上限，违反仓库“资源超限严格拒绝”契约。→ 先校验声明长度总量预算，再逐产物顺序比对，字节相等后才解码。（2026-08-02 复核更正措辞：实现是**产物粒度顺序处理**——单产物整体读入、受预算约束，并非块级流式/峰值恒定；同日 N2 修复又将每个描述符与可信重算证据的 (sha256, byte_length) 在任何产物 I/O 之前精确核对。）
-- **F3** [中] profile 声明过期 entrypoint digest：v4 入口文件被改后，worker 用双常量同时接受新旧 digest，报告发布的仍是旧 digest，provenance 失真。→ profile 记录实际执行文件的 digest、纳入 device-policy 文件、移除双 digest 例外；profile 名保持 `source-preserve.v4` 不变（算法语义未变，只是 attestation 归真）。
-  （本次交接已独立确认：profile 中 `entrypoint.sha256` 与 `entrypoint.device_policy.sha256` 与磁盘文件实算 sha256 完全一致，且各只有一个值。）
+- **F3** [中] profile 声明过期 entrypoint digest：v4 入口文件被改后，worker 用双常量同时接受新旧 digest，报告发布的仍是旧 digest，provenance 失真。→ 当轮先让 profile 记录实际执行文件的 digest、纳入 device-policy 文件并移除双 digest 例外；当时暂时保持 `source-preserve.v4`（后续 profile identity 决策已在 §11 升为 v5，原 v4 profile/入口按原摘要归档）。
+  （本次交接已独立确认：当轮 profile 中 `entrypoint.sha256` 与 `entrypoint.device_policy.sha256` 与磁盘文件实算 sha256 完全一致，且各只有一个值；后续 active v5 的新摘要链见 §11。）
 
 ## 3. 代码现状
 
@@ -210,6 +210,17 @@ python -m spikes.gate_f_runner verify-model-candidate --run-id run.local-model
 
 - **已闭环**：N1（attestation 摘要经 worker 返回、workbench 独立重验后并入报告；`postprocess_algorithm` 发布带 `.psd-postcorrect.v1` 后缀的实际执行标识；历史 v2/v3 不变且携带 attestation 会被拒）、N2（描述符与可信重算证据的 (sha256, byte_length) 在任何产物 I/O 前精确核对）、N3（`_png_facts` 解码前验画布 + 钉版加载 + 炸弹护栏）、N4（active v4 阈值改读 profile 的 31，附 `alpha_threshold_source`；v2/v3 保持 15 并标注 legacy 来源）、N5（新增 `.gitattributes` 保护全部 raw-digest 绑定路径）、N8（`purpose_created.py` 共享模块，生产者/验证器字节级等价实证）。双路复核确认闭环（记录：`.claude/review-records/2026-08-02-fix-round-adversarial-review/`）。
 - **复核抓出的第二批缺陷已收尾修复**：D1/Codex#2（报告 `format_version` 升 0.4.0，loader 对历史 v2/v3 的 0.3.0 持久化报告按投影严格验证，v4 的 0.3.0 与未知版本给专门版本错误，附静态字节 fixture 回归）、Codex#3（attestation 组件设备必须精确等于顶层 `execution_device`，覆盖裸 `cuda`/`cuda:1`/混合设备负例）、D2（reason_codes 列表去别名）、D3（`MAX_IMAGE_PIXELS` 三处改共用进程级锁上下文管理器，含线程交错回归）、D4/D5（死参数与危险默认参数清除）、D6（纵深预算测试改名标注）、D7（本文档 §2.2 F2 措辞更正）、D8（non-active 文案）。
-- **显式不修、留决策**：attestation 与 run/source/产物的强绑定（Codex#1，中危——当前 attestation 是可逐字复现的自述，非执行期密码学证明；修复需改 digest 绑定的入口脚本并连带 profile digest 更新）与 N6（profile_id 升 v5 还是加 `attestation_revision`，涉及本仓库 CLAUDE.md 固定 profile 名与仅存于原 Windows 工作副本的历史 v2/v3 profile 内容归档）。二者同属 digest 链决策域，建议一并定夺。N7 按复核结论接受现状（loopback-only，实测 ~30 ms/帧）。
-- **注意**：`format_version` 升 0.4.0 意味着本轮之前发布的 **active v4** workbench 报告需重新生成（历史 v2/v3 报告仍按 0.3.0 投影可验，符合仓库承诺）；目前尚无真实 GPU 运行产物，实际影响为零。
+- **当轮显式留决策（后续状态见 §11）**：attestation 与 run/source/产物的绑定（Codex#1，中危——当轮 attestation 是可逐字复现的自述，非执行期密码学证明）与 N6（profile_id 升 v5 还是加 `attestation_revision`）。二者同属 digest 链决策域，已在后续一并定夺并实现。N7 按复核结论接受现状（loopback-only，实测 ~30 ms/帧）。
+- **注意**：`format_version` 升 0.4.0 意味着本轮之前发布的 **active v4** workbench 报告需重新生成（历史 v2/v3 报告仍按 0.3.0 投影可验，符合仓库承诺）；当时尚无真实 GPU 运行产物，实际影响为零。v4 后续成为历史 profile，active v5 报告版本升为 0.5.0，见 §11。
 - 验收状态：完整套件（Pillow venv）全绿、`preflight` `LOCAL_TECHNICAL_PREFLIGHT_PASS` + `GATE_F_NOT_EVALUATED`、文档 lint 通过（以主模型宿主机独立复跑为准；Codex 沙箱内 `test_gate_f_gui_server` 的 12 项 socket bind 失败为沙箱限制，宿主复跑通过）。P1-2（Windows + WSL2 GPU 真机链路）仍开放。
+
+## 11. v5 digest 链与每次运行清单绑定（2026-08-02，UTC，同日追加）
+
+§10 留下的两个决策已作为同一变更闭环。由于新的运行绑定改变了入口字节、报告语义和下游可消费身份，而仓库内尚无真实 v5 运行产物，本轮选择把 active profile 升为 `see-through.v3.nf4.1280.wsl2.source-preserve.v5`，同时把原 v4 profile 原字节归档为 `model_profiles/see-through-v3-nf4.source-preserve-v4.json`。历史 v2/v3/v4 继续按各自原 profile/入口摘要只读验证，不追溯获得 v5 语义。
+
+- **每次运行绑定**：受信父进程为每次 WSL2 调用生成一次性 challenge；v5 入口在上游脚本完整成功返回（含成功 `SystemExit(0/None)`）且 PSD 像素投影确实执行后，记录源图 SHA-256、最终产物清单及其摘要。非零退出或未完成 PSD 投影不会发布 attestation。
+- **三次独立核对**：worker 消费 attestation 时逐项核对 challenge、源图摘要、声明清单和磁盘清单；固定 inventory/PSD 验证后再次从最终发布目录重算清单摘要；workbench 构建或重载报告时再从留存的 `model-output/input` 重算。任一产物在这些边界间变动均 fail-closed，报告保持 `model_used: false` 并使用有界 reason code。
+- **资源与进程边界**：清单遍历与哈希有固定的累计字节、条目、目录、节点、深度和相对路径长度上限，父进程与 v5 入口使用同一套规则，attestation 排除文件不计入节点上限；challenge、attestation 路径与源路径通过父环境及 `WSLENV` 透传，不再出现在 `wsl.exe` argv。新增 v0.2 motion/candidate schema 和 profile identity，旧 v0.1 schema 保持不变，并加入立项文档 lint 的必需文件列表。
+- **摘要冻结**：active v5 入口 SHA-256 为 `8732db76c4fcf3f4bf7e94f3a206456ffbf9bd78ef773aa66d9b793c6f8f1ac5`（遍历边界修复后就地更新 v5，未升 v6），与 active profile 声明一致；归档 v4 profile SHA-256 保持 `d24de59690e0db2c64828e580eed8b00f939d5327b255ef59f1826f8cf582ae3`，v4 入口保持 `ae4d26b042b8b15e7bdcfdacd11c50b16d97c1ccf19aad94162dd67046e1642f`，device policy 保持 `569e0ced8bcc4b144bfc787e0e37f2d90fc263081ceac3c063eabf26ce1c14df`。
+- **能力边界不变**：该绑定证明受信父进程看到的源图、attestation 和发布产物清单彼此一致；它不证明被钉死的 entrypoint 确实执行，不是密码学执行证明或可信执行环境保证。完全控制 WSL2 worker 环境者仍可为自造产物生成自洽清单。所有结果继续是 `review_required` 与 `GATE_F_NOT_EVALUATED`，不证明模型质量、PSD 外部互操作、`.oc2d`、专业绑定或 Gate F 可行性。
+- **仍开放的真机门**：P1-2 必须在 Windows + 隔离 WSL2 GPU 上执行 active v5 的 `model → motion → model-candidate → verify-model-candidate` 全链路，确认上游脚本收尾后不再修改产物、环境透传在目标 WSL 版本有效、最终清单三次重算一致，并保留权利明确且不入库的输入。macOS 单元测试、标准库合成编排 smoke 与本地技术预检不能替代该证据。

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import io
 import json
 import math
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -22,7 +24,7 @@ from .runtime import canonical_json_bytes, read_bounded_file, sha256_bytes, stri
 PROFILE_ROOT = Path(__file__).with_name("model_profiles")
 ENTRYPOINT_ROOT = Path(__file__).with_name("model_entrypoints")
 DEVICE_POLICY_PATH = ENTRYPOINT_ROOT / "nf4_marigold_device_policy.py"
-PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v4"
+PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v5"
 PROFILE_PATH = PROFILE_ROOT / "see-through-v3-nf4.json"
 LEGACY_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.v2"
 LEGACY_PROFILE_SHA256 = "14577459cc2e33aba3c0e74fd13f134aecfaaf45bb8acae96112182aa8239e35"
@@ -32,6 +34,18 @@ LEGACY_UPSTREAM_COMMIT = "58a1cb11d13f85acec9bbddb8cd4b6487843d4cf"
 LEGACY_SOURCE_PRESERVE_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v3"
 LEGACY_SOURCE_PRESERVE_PROFILE_SHA256 = "990b2561bb2067e3838aedf1751d9a86a06e6dfc985aad92189ec9fda387ec83"
 LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256 = "6b625faa99022f6edfa5faba97b23054331b9276501e2b02953cb783f357ec71"
+LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v4"
+LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256 = "d24de59690e0db2c64828e580eed8b00f939d5327b255ef59f1826f8cf582ae3"
+LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256 = "ae4d26b042b8b15e7bdcfdacd11c50b16d97c1ccf19aad94162dd67046e1642f"
+LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID = "see-through.v4.nf4-marigold-bounded-offload.v1"
+LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID = (
+    "source-visible-rgb-by-depth-mask-clean.v2.psd-postcorrect.v1"
+)
+LEGACY_V4_ENTRYPOINT_COMPONENT_DISPOSITIONS = (
+    ("vae", "sequential-cpu-offload"),
+    ("unet", "resident-quantized"),
+    ("text_encoder", "cached-and-released"),
+)
 SOURCE_PRESERVE_ALGORITHM_ID = "source-visible-rgb-by-depth-mask-clean.v2"
 NF4_MARIGOLD_DEVICE_POLICY_ID = "see-through.v4.nf4-marigold-bounded-offload.v1"
 PSD_PIXEL_PROJECTION_ALGORITHM_ID = f"{SOURCE_PRESERVE_ALGORITHM_ID}.psd-postcorrect.v1"
@@ -43,6 +57,11 @@ ENTRYPOINT_COMPONENT_DISPOSITIONS = (
 MAX_MODEL_STDIO_BYTES = 2 * 1024 * 1024
 MAX_MODEL_RESULT_BYTES = 512 * 1024 * 1024
 MAX_MODEL_PNG_BYTES = 64 * 1024 * 1024
+MAX_MODEL_ARTIFACT_MANIFEST_ENTRIES = 256
+MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES = 64
+MAX_MODEL_ARTIFACT_MANIFEST_NODES = 320
+MAX_MODEL_ARTIFACT_MANIFEST_DEPTH = 8
+MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES = 512
 MODEL_PART_NAMES = (
     "front hair",
     "back hair",
@@ -146,7 +165,11 @@ def _runtime(profile: dict[str, object]) -> tuple[str, str, str]:
     return distribution, root, python
 
 
-def _validated_entrypoint(profile: dict[str, object]) -> Path:
+def _validated_profile_entrypoint(
+    profile: dict[str, object],
+    *,
+    expected_device_policy_name: str | None,
+) -> Path:
     entrypoint = profile.get("entrypoint")
     if not isinstance(entrypoint, dict) or set(entrypoint) != {
         "path",
@@ -178,7 +201,10 @@ def _validated_entrypoint(profile: dict[str, object]) -> Path:
     policy_relative = device_policy.get("path")
     policy_digest = device_policy.get("sha256")
     if (
-        policy_relative != DEVICE_POLICY_PATH.name
+        not isinstance(policy_relative, str)
+        or Path(policy_relative).name != policy_relative
+        or not policy_relative
+        or (expected_device_policy_name is not None and policy_relative != expected_device_policy_name)
         or not isinstance(policy_digest, str)
         or len(policy_digest) != 64
         or any(character not in "0123456789abcdef" for character in policy_digest)
@@ -188,6 +214,17 @@ def _validated_entrypoint(profile: dict[str, object]) -> Path:
     if sha256_bytes(policy_exact) != policy_digest:
         raise StageContractError("model entrypoint device policy digest mismatch")
     return path
+
+
+def _validated_entrypoint(profile: dict[str, object]) -> Path:
+    return _validated_profile_entrypoint(
+        profile,
+        expected_device_policy_name=DEVICE_POLICY_PATH.name,
+    )
+
+
+def _validated_archived_entrypoint(profile: dict[str, object]) -> Path:
+    return _validated_profile_entrypoint(profile, expected_device_policy_name=None)
 
 
 def _run_checked(
@@ -478,6 +515,7 @@ def _invoke_wsl(
     }:
         raise StageContractError("model role inventory is invalid")
     source_wsl = _wsl_path(source, distribution)
+    attestation_challenge = secrets.token_hex(32)
     entrypoint_wsl = _wsl_path(entrypoint, distribution)
     inference_output = output / "input"
     inference_output.mkdir()
@@ -486,7 +524,6 @@ def _invoke_wsl(
     command = [
         "wsl.exe", "-d", distribution, "--cd", f"~/{root}", "--",
         f"./{python}", entrypoint_wsl,
-        "--srcp", source_wsl,
         "--save_dir", output_wsl,
         "--save_to_psd",
         "--tblr_split",
@@ -513,45 +550,83 @@ def _invoke_wsl(
         "TRANSFORMERS_OFFLINE=1",
         "TRANSFORMERS_NO_ADVISORY_WARNINGS=1",
         "DO_NOT_TRACK=1",
-        f"ONECLICK2D_ENTRYPOINT_ATTESTATION={output_wsl}/.entrypoint-attestation.json",
         f"PYTORCH_CUDA_ALLOC_CONF={inference.get('cuda_allocator')}",
     ]
+    process_env = os.environ.copy()
+    forwarded = {
+        "ONECLICK2D_ENTRYPOINT_ATTESTATION": f"{output_wsl}/.entrypoint-attestation.json",
+        "ONECLICK2D_ATTESTATION_CHALLENGE": attestation_challenge,
+        "ONECLICK2D_ATTESTATION_SOURCE": source_wsl,
+    }
+    forwarded_names = set(forwarded)
+    wslenv_entries = [
+        entry
+        for entry in process_env.get("WSLENV", "").split(":")
+        if entry and entry.split("/", 1)[0] not in forwarded_names
+    ]
+    process_env.update(forwarded)
+    process_env["WSLENV"] = ":".join([*wslenv_entries, *forwarded])
     completed = _run_checked(
         command,
         timeout=timeout_seconds,
         output_limit=MAX_MODEL_STDIO_BYTES,
-        env=os.environ.copy(),
+        env=process_env,
     )
-    attestation = _consume_entrypoint_attestation(attestation_path) if completed.returncode == 0 else None
+    attestation = (
+        _consume_entrypoint_attestation(
+            attestation_path,
+            expected_challenge=attestation_challenge,
+            source=source,
+        )
+        if completed.returncode == 0
+        else None
+    )
     return completed, attestation
 
 
-def _validated_entrypoint_attestation_summary(value: object) -> Mapping[str, object]:
+_ENTRYPOINT_ATTESTATION_SUMMARY_KEYS = {
+    "policy_id",
+    "requested_cpu_offload",
+    "execution_device",
+    "components",
+    "psd_pixel_projection_algorithm_id",
+    "psd_projection_verified",
+}
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validated_device_attestation_summary(
+    value: object,
+    *,
+    expected_keys: set[str],
+    policy_id: str,
+    psd_projection_algorithm_id: str,
+    component_dispositions: tuple[tuple[str, str], ...],
+) -> Mapping[str, object]:
     if (
         not isinstance(value, Mapping)
-        or set(value)
-        != {
-            "policy_id",
-            "requested_cpu_offload",
-            "execution_device",
-            "components",
-            "psd_pixel_projection_algorithm_id",
-            "psd_projection_verified",
-        }
-        or value.get("policy_id") != NF4_MARIGOLD_DEVICE_POLICY_ID
+        or set(value) != expected_keys
+        or value.get("policy_id") != policy_id
         or value.get("requested_cpu_offload") is not True
         or value.get("execution_device") != "cuda:0"
-        or value.get("psd_pixel_projection_algorithm_id") != PSD_PIXEL_PROJECTION_ALGORITHM_ID
+        or value.get("psd_pixel_projection_algorithm_id") != psd_projection_algorithm_id
         or value.get("psd_projection_verified") is not True
     ):
         raise StageContractError("model entrypoint attestation is invalid")
     execution_device = str(value["execution_device"])
     components = value.get("components")
-    expected_dispositions = dict(ENTRYPOINT_COMPONENT_DISPOSITIONS)
+    expected_dispositions = dict(component_dispositions)
     if not isinstance(components, Mapping) or set(components) != set(expected_dispositions):
         raise StageContractError("model entrypoint device attestation is invalid")
     frozen_components: dict[str, Mapping[str, object]] = {}
-    for name, disposition in ENTRYPOINT_COMPONENT_DISPOSITIONS:
+    for name, disposition in component_dispositions:
         component = components.get(name)
         if not isinstance(component, Mapping) or set(component) != {
             "storage_devices",
@@ -597,18 +672,62 @@ def _validated_entrypoint_attestation_summary(value: object) -> Mapping[str, obj
         raise StageContractError("model entrypoint device attestation is invalid")
     return MappingProxyType(
         {
-            "policy_id": NF4_MARIGOLD_DEVICE_POLICY_ID,
+            "policy_id": policy_id,
             "requested_cpu_offload": True,
             "execution_device": execution_device,
             "components": MappingProxyType(frozen_components),
-            "psd_pixel_projection_algorithm_id": PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+            "psd_pixel_projection_algorithm_id": psd_projection_algorithm_id,
             "psd_projection_verified": True,
         }
     )
 
 
-def _entrypoint_attestation_dict(value: object) -> dict[str, object]:
-    summary = _validated_entrypoint_attestation_summary(value)
+def _validated_entrypoint_attestation_summary(value: object) -> Mapping[str, object]:
+    summary = _validated_device_attestation_summary(
+        value,
+        expected_keys=_ENTRYPOINT_ATTESTATION_SUMMARY_KEYS | {"binding"},
+        policy_id=NF4_MARIGOLD_DEVICE_POLICY_ID,
+        psd_projection_algorithm_id=PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+        component_dispositions=ENTRYPOINT_COMPONENT_DISPOSITIONS,
+    )
+    if not isinstance(value, Mapping):
+        raise StageContractError("model entrypoint attestation is invalid")
+    binding = value.get("binding")
+    if (
+        not isinstance(binding, Mapping)
+        or set(binding) != {"source_sha256", "artifact_manifest_digest"}
+        or not _is_sha256(binding.get("source_sha256"))
+        or not _is_sha256(binding.get("artifact_manifest_digest"))
+    ):
+        raise StageContractError("model entrypoint attestation binding is invalid")
+    return MappingProxyType(
+        {
+            **summary,
+            "binding": MappingProxyType(
+                {
+                    "source_sha256": binding["source_sha256"],
+                    "artifact_manifest_digest": binding["artifact_manifest_digest"],
+                }
+            ),
+        }
+    )
+
+
+def _validated_legacy_v4_entrypoint_attestation_summary(value: object) -> Mapping[str, object]:
+    return _validated_device_attestation_summary(
+        value,
+        expected_keys=_ENTRYPOINT_ATTESTATION_SUMMARY_KEYS,
+        policy_id=LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID,
+        psd_projection_algorithm_id=LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+        component_dispositions=LEGACY_V4_ENTRYPOINT_COMPONENT_DISPOSITIONS,
+    )
+
+
+def _entrypoint_attestation_dict_from_summary(
+    summary: Mapping[str, object],
+    *,
+    component_dispositions: tuple[tuple[str, str], ...],
+) -> dict[str, object]:
     components = summary["components"]
     if not isinstance(components, Mapping):
         raise StageContractError("model entrypoint device attestation is invalid")
@@ -623,19 +742,176 @@ def _entrypoint_attestation_dict(value: object) -> dict[str, object]:
                 "upstream_cuda_move_suppressed": components[name]["upstream_cuda_move_suppressed"],
                 "disposition": components[name]["disposition"],
             }
-            for name, _ in ENTRYPOINT_COMPONENT_DISPOSITIONS
+            for name, _ in component_dispositions
         },
         "psd_pixel_projection_algorithm_id": summary["psd_pixel_projection_algorithm_id"],
         "psd_projection_verified": summary["psd_projection_verified"],
     }
 
 
-def _consume_entrypoint_attestation(path: Path) -> Mapping[str, object]:
+def _entrypoint_attestation_dict(value: object) -> dict[str, object]:
+    summary = _validated_entrypoint_attestation_summary(value)
+    result = _entrypoint_attestation_dict_from_summary(
+        summary,
+        component_dispositions=ENTRYPOINT_COMPONENT_DISPOSITIONS,
+    )
+    binding = summary["binding"]
+    if not isinstance(binding, Mapping):
+        raise StageContractError("model entrypoint attestation binding is invalid")
+    result["binding"] = {
+        "source_sha256": binding["source_sha256"],
+        "artifact_manifest_digest": binding["artifact_manifest_digest"],
+    }
+    return result
+
+
+def _legacy_v4_entrypoint_attestation_dict(value: object) -> dict[str, object]:
+    return _entrypoint_attestation_dict_from_summary(
+        _validated_legacy_v4_entrypoint_attestation_summary(value),
+        component_dispositions=LEGACY_V4_ENTRYPOINT_COMPONENT_DISPOSITIONS,
+    )
+
+
+def _validated_declared_artifact_manifest(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise StageContractError("model entrypoint artifact manifest is invalid")
+    manifest: list[dict[str, object]] = []
+    previous_path: str | None = None
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256", "byte_length"}:
+            raise StageContractError("model entrypoint artifact manifest is invalid")
+        relative = item.get("path")
+        byte_length = item.get("byte_length")
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or "\\" in relative
+            or Path(relative).is_absolute()
+            or "." in Path(relative).parts
+            or ".." in Path(relative).parts
+            or Path(relative).as_posix() != relative
+            or (previous_path is not None and relative <= previous_path)
+            or not _is_sha256(item.get("sha256"))
+            or isinstance(byte_length, bool)
+            or not isinstance(byte_length, int)
+            or byte_length < 0
+        ):
+            raise StageContractError("model entrypoint artifact manifest is invalid")
+        manifest.append(
+            {
+                "path": relative,
+                "sha256": item["sha256"],
+                "byte_length": byte_length,
+            }
+        )
+        previous_path = relative
+    if not any(str(item["path"]).endswith(".psd") for item in manifest):
+        raise StageContractError("model entrypoint artifact manifest is invalid")
+    return manifest
+
+
+def _bounded_artifact_files(
+    root: Path,
+    excluded_path: Path | None = None,
+) -> list[tuple[str, Path, int]]:
+    if root.is_symlink() or not root.is_dir():
+        raise StageContractError("model entrypoint artifact manifest root is invalid")
+    files: list[tuple[str, Path, int]] = []
+    directories = 0
+    nodes = 0
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    try:
+        while stack:
+            directory, depth = stack.pop()
+            if depth > MAX_MODEL_ARTIFACT_MANIFEST_DEPTH:
+                raise StageContractError("model entrypoint artifact manifest depth exceeded its bound")
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    candidate = Path(entry.path)
+                    if excluded_path is not None and candidate == excluded_path:
+                        continue
+                    nodes += 1
+                    if nodes > MAX_MODEL_ARTIFACT_MANIFEST_NODES:
+                        raise StageContractError(
+                            "model entrypoint artifact manifest node count exceeded its bound"
+                        )
+                    relative = candidate.relative_to(root).as_posix()
+                    if len(relative.encode("utf-8")) > MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES:
+                        raise StageContractError(
+                            "model entrypoint artifact manifest path length exceeded its bound"
+                        )
+                    if entry.is_symlink():
+                        raise StageContractError("model entrypoint artifact manifest contains a symlink")
+                    if entry.is_dir(follow_symlinks=False):
+                        directories += 1
+                        if directories > MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES:
+                            raise StageContractError(
+                                "model entrypoint artifact manifest directory count exceeded its bound"
+                            )
+                        stack.append((candidate, depth + 1))
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        raise StageContractError(
+                            "model entrypoint artifact manifest contains a non-regular node"
+                        )
+                    if len(files) >= MAX_MODEL_ARTIFACT_MANIFEST_ENTRIES:
+                        raise StageContractError(
+                            "model entrypoint artifact manifest entry count exceeded its bound"
+                        )
+                    size = entry.stat(follow_symlinks=False).st_size
+                    if size < 0:
+                        raise StageContractError(
+                            "model entrypoint artifact manifest file size is invalid"
+                        )
+                    files.append((relative, candidate, size))
+    except OSError as exc:
+        raise StageContractError("model entrypoint artifact manifest could not be enumerated") from exc
+    return sorted(files, key=lambda item: item[0])
+
+
+def _artifact_manifest(root: Path, attestation_path: Path) -> list[dict[str, object]]:
+    manifest: list[dict[str, object]] = []
+    total = 0
+    for relative, candidate, size in _bounded_artifact_files(root, attestation_path):
+        if size > MAX_MODEL_RESULT_BYTES - total:
+            raise StageContractError(
+                "model entrypoint artifact manifest byte count exceeded its bound"
+            )
+        try:
+            exact = read_bounded_file(candidate, MAX_MODEL_RESULT_BYTES - total)
+        except (OSError, ValueError) as exc:
+            raise StageContractError("model entrypoint artifact manifest file is unreadable") from exc
+        if len(exact) != size:
+            raise StageContractError("model entrypoint artifact manifest file changed while hashing")
+        total += len(exact)
+        manifest.append(
+            {
+                "path": relative,
+                "sha256": sha256_bytes(exact),
+                "byte_length": len(exact),
+            }
+        )
+    if not any(str(item["path"]).endswith(".psd") for item in manifest):
+        raise StageContractError("model entrypoint artifact manifest contains no PSD")
+    return manifest
+
+
+def _artifact_manifest_digest(manifest: list[dict[str, object]]) -> str:
+    exact = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256_bytes(exact)
+
+
+def _consume_entrypoint_attestation(
+    path: Path,
+    *,
+    expected_challenge: str,
+    source: Path,
+) -> Mapping[str, object]:
     try:
         if path.is_symlink() or not path.is_file():
             raise StageContractError("model entrypoint attestation is missing")
         try:
-            value = strict_load_json_bytes(read_bounded_file(path, 16 * 1024))
+            value = strict_load_json_bytes(read_bounded_file(path, 64 * 1024))
         except (OSError, UnicodeDecodeError, ValueError, TypeError) as exc:
             raise StageContractError("model entrypoint attestation is invalid") from exc
         if (
@@ -650,6 +926,7 @@ def _consume_entrypoint_attestation(path: Path) -> Mapping[str, object]:
                 "components",
                 "psd_pixel_projection_algorithm_id",
                 "psd_projection_verified",
+                "binding",
             }
             or value.get("format") != "oneclick2d.model-entrypoint-attestation"
             or value.get("format_version") != "0.1.0"
@@ -660,6 +937,43 @@ def _consume_entrypoint_attestation(path: Path) -> Mapping[str, object]:
             or value.get("psd_projection_verified") is not True
         ):
             raise StageContractError("model entrypoint attestation is invalid")
+        binding = value.get("binding")
+        if (
+            not isinstance(binding, dict)
+            or set(binding)
+            != {
+                "challenge",
+                "source_sha256",
+                "artifact_manifest_digest",
+                "artifact_manifest",
+            }
+            or not isinstance(binding.get("challenge"), str)
+            or len(str(binding["challenge"])) != 64
+            or any(character not in "0123456789abcdef" for character in str(binding["challenge"]))
+            or not _is_sha256(binding.get("source_sha256"))
+            or not _is_sha256(binding.get("artifact_manifest_digest"))
+        ):
+            raise StageContractError("model entrypoint attestation binding is invalid")
+        if not hmac.compare_digest(str(binding["challenge"]), expected_challenge):
+            raise StageContractError("model entrypoint attestation challenge mismatch")
+        try:
+            worker_source_sha256 = sha256_bytes(read_bounded_file(source, 25 * 1024 * 1024))
+        except (OSError, ValueError) as exc:
+            raise StageContractError("model entrypoint attestation source verification failed") from exc
+        if not hmac.compare_digest(str(binding["source_sha256"]), worker_source_sha256):
+            raise StageContractError("model entrypoint attestation source digest mismatch")
+        declared_manifest = _validated_declared_artifact_manifest(binding["artifact_manifest"])
+        actual_manifest = _artifact_manifest(path.parent, path)
+        if declared_manifest != actual_manifest:
+            raise StageContractError(
+                "model entrypoint artifact manifest changed after entrypoint attestation"
+            )
+        actual_manifest_digest = _artifact_manifest_digest(actual_manifest)
+        if not hmac.compare_digest(
+            str(binding["artifact_manifest_digest"]),
+            actual_manifest_digest,
+        ):
+            raise StageContractError("model entrypoint artifact manifest digest mismatch")
         return _validated_entrypoint_attestation_summary(
             {
                 "policy_id": value["policy_id"],
@@ -668,6 +982,10 @@ def _consume_entrypoint_attestation(path: Path) -> Mapping[str, object]:
                 "components": value["components"],
                 "psd_pixel_projection_algorithm_id": value["psd_pixel_projection_algorithm_id"],
                 "psd_projection_verified": value["psd_projection_verified"],
+                "binding": {
+                    "source_sha256": binding["source_sha256"],
+                    "artifact_manifest_digest": binding["artifact_manifest_digest"],
+                },
             }
         )
     finally:
@@ -896,26 +1214,22 @@ def _validate_model_output(directory: Path, profile: dict[str, object]) -> tuple
 
 
 def _inventory(directory: Path) -> list[dict[str, object]]:
-    if directory.is_symlink() or not directory.is_dir():
-        raise StageContractError("model worker did not publish an output directory")
     files: list[dict[str, object]] = []
     total = 0
-    for path in sorted(directory.rglob("*")):
-        if path.is_symlink():
-            raise StageContractError("model worker output contains a symlink")
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if directory.resolve() not in resolved.parents:
-            raise StageContractError("model worker output escaped its directory")
-        size = path.stat().st_size
-        total += size
-        if total > MAX_MODEL_RESULT_BYTES:
+    for relative, path, size in _bounded_artifact_files(directory):
+        if size > MAX_MODEL_RESULT_BYTES - total:
             raise StageContractError("model worker result exceeded its bound")
+        try:
+            exact = read_bounded_file(path, MAX_MODEL_RESULT_BYTES - total)
+        except (OSError, ValueError) as exc:
+            raise StageContractError("model worker output file is unreadable") from exc
+        if len(exact) != size:
+            raise StageContractError("model worker output file changed while hashing")
+        total += len(exact)
         files.append({
-            "uri": path.relative_to(directory).as_posix(),
-            "byte_length": size,
-            "sha256": sha256_bytes(read_bounded_file(path, MAX_MODEL_RESULT_BYTES)),
+            "uri": relative,
+            "byte_length": len(exact),
+            "sha256": sha256_bytes(exact),
         })
     if not files:
         raise StageContractError("model worker produced no files")
@@ -926,6 +1240,7 @@ def run_model_worker(source: Path, output_root: Path, *, timeout_seconds: int = 
     if source.is_symlink() or not source.is_file():
         raise StageContractError("model worker source is invalid")
     source_bytes = read_bounded_file(source, 25 * 1024 * 1024)
+    source_sha256 = sha256_bytes(source_bytes)
     profile, profile_bytes = _load_profile()
     runtime = profile.get("runtime")
     if not isinstance(runtime, dict):
@@ -957,6 +1272,20 @@ def run_model_worker(source: Path, output_root: Path, *, timeout_seconds: int = 
     indexed = {str(item["uri"]): item for item in files}
     if set(indexed) != _expected_output_uris():
         raise StageContractError("model worker output inventory does not match the fixed profile")
+    attestation = _entrypoint_attestation_dict(entrypoint_attestation)
+    binding = attestation["binding"]
+    if not hmac.compare_digest(str(binding["source_sha256"]), source_sha256):
+        raise StageContractError("model worker entrypoint source binding does not match")
+    published_manifest = _artifact_manifest(
+        candidates[0],
+        candidates[0] / ".entrypoint-attestation.json",
+    )
+    published_manifest_digest = _artifact_manifest_digest(published_manifest)
+    if not hmac.compare_digest(
+        str(binding["artifact_manifest_digest"]),
+        published_manifest_digest,
+    ):
+        raise StageContractError("model worker published artifact manifest digest mismatch")
     for uri, structure in (
         ("input/input.psd", validated_psd),
         ("input/input_depth.psd", validated_depth_psd),
@@ -972,11 +1301,11 @@ def run_model_worker(source: Path, output_root: Path, *, timeout_seconds: int = 
         "profile_id": PROFILE_ID,
         "profile_sha256": sha256_bytes(profile_bytes),
         "dependencies_sha256": dependencies_sha256,
-        "source_sha256": sha256_bytes(source_bytes),
+        "source_sha256": source_sha256,
         "model_used": True,
         "oc2d_produced": False,
         "gate_f_status": "GATE_F_NOT_EVALUATED",
-        "entrypoint_attestation": _entrypoint_attestation_dict(entrypoint_attestation),
+        "entrypoint_attestation": attestation,
         "files": files,
         "psd": indexed["input/input.psd"],
     }
