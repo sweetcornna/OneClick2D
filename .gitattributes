@@ -1,0 +1,9 @@
+# These paths are bound to raw-byte sha256 attestations (model entrypoint/profile
+# digests, dependencies_sha256, ontology digest, vendored-asset and fixture hashes).
+# Any EOL normalization changes the bytes and hard-fails digest validation.
+spikes/gate_f_runner/model_entrypoints/** -text
+spikes/gate_f_runner/model_profiles/** -text
+spikes/gate_f_runner/requirements-*.txt -text
+spikes/gate_f_runner/gui/vendor/** -text
+examples/gate-f-spike-smoke/** -text
+registries/** -text
