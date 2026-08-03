@@ -224,3 +224,67 @@ python -m spikes.gate_f_runner verify-model-candidate --run-id run.local-model
 - **摘要冻结**：active v5 入口 SHA-256 为 `8732db76c4fcf3f4bf7e94f3a206456ffbf9bd78ef773aa66d9b793c6f8f1ac5`（遍历边界修复后就地更新 v5，未升 v6），与 active profile 声明一致；归档 v4 profile SHA-256 保持 `d24de59690e0db2c64828e580eed8b00f939d5327b255ef59f1826f8cf582ae3`，v4 入口保持 `ae4d26b042b8b15e7bdcfdacd11c50b16d97c1ccf19aad94162dd67046e1642f`，device policy 保持 `569e0ced8bcc4b144bfc787e0e37f2d90fc263081ceac3c063eabf26ce1c14df`。
 - **能力边界不变**：该绑定证明受信父进程看到的源图、attestation 和发布产物清单彼此一致；它不证明被钉死的 entrypoint 确实执行，不是密码学执行证明或可信执行环境保证。完全控制 WSL2 worker 环境者仍可为自造产物生成自洽清单。所有结果继续是 `review_required` 与 `GATE_F_NOT_EVALUATED`，不证明模型质量、PSD 外部互操作、`.oc2d`、专业绑定或 Gate F 可行性。
 - **仍开放的真机门**：P1-2 必须在 Windows + 隔离 WSL2 GPU 上执行 active v5 的 `model → motion → model-candidate → verify-model-candidate` 全链路，确认上游脚本收尾后不再修改产物、环境透传在目标 WSL 版本有效、最终清单三次重算一致，并保留权利明确且不入库的输入。macOS 单元测试、标准库合成编排 smoke 与本地技术预检不能替代该证据。
+
+## 12. 遍历/哈希边界收口与静态 fixture 可移植性发现（2026-08-02，UTC，同日追加）
+
+> 本节由 Linux 接手会话追加（原生 Ubuntu，Python 3.14.4 + Pillow 12.1.0 venv，**非 WSL**）。基线 `93aec48`（PR #4 已合并）。对象仍是 `spikes/` 下 Gate F 前可丢弃预研，全部状态继续 `GATE_F_NOT_EVALUATED`。
+
+### 12.1 §9/§11 留下的两条非阻塞加固候选已闭环
+
+两条都记在 `.claude/review-records/2026-08-02-v5-binding-review/README.md` 的"仍开放"末尾，均为基线既存、非当轮引入。本轮一并收口，**未触碰任何被摘要钉死的文件**——active v5 入口仍为 `8732db76c4fcf3f4bf7e94f3a206456ffbf9bd78ef773aa66d9b793c6f8f1ac5`、active profile 仍为 `e53049e5885419bd9d1d5c70d8b2514226ddcab9c33cdc8750d3f206401e4009`，实算与声明一致。
+
+- **加固 A（workbench 清单遍历无界）**：`model_workbench.py` 的 `_indexed_files` 全树遍历此前只靠"首个非常规节点即拒 + 事后集合比对"兜底，没有节点/目录/深度/相对路径长度上限。该函数在**重载已持久化报告**时会重走 `model-output`，此时 worker 进程内的 `_inventory` 边界并不会再次施加，因此这是真实的资源耗尽面。现改为复用 worker 的同一组常量（`MAX_MODEL_ARTIFACT_MANIFEST_{DEPTH,DIRECTORIES,NODES,ENTRIES}` 与 `MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES`），并在遍历期即 fail-closed。固定 profile 的合法产物树为 55 文件 / 57 节点 / 深度 2，远在 256 / 320 / 8 之内；且同一棵树在 worker 边界已由 `_inventory` 施加同样上限，故此改动是**对齐**而非收紧。
+- **加固 B（worker 清单重算整文件读入内存）**：`_artifact_manifest` 与 `_inventory` 此前用 `read_bounded_file` 把单个产物整体读入再哈希，单文件峰值可达 `MAX_MODEL_RESULT_BYTES`（512 MiB）。**被钉死的 v5 入口本就是分块流式**（`_sha256_file`，1 MiB 块），所以这是父进程侧的单边不对称。新增 `_bounded_artifact_digest(path, maximum)`，按 1 MiB 块流式哈希并返回 `(sha256, byte_length)`，边界语义与 v5 入口逐条对齐；同时用 `is_symlink()/is_file()` 预检加打开后 `fstat` 的 `S_ISREG` 复核，比原先只靠 `read_bounded_file` 的符号链接预检更严。**产出不变**（同样的 `sha256`/`byte_length`），因此不影响任何既有摘要或 attestation 绑定。
+- **回归测试**：worker 侧新增 5 项（分块峰值上限、超预算增长拒绝、符号链接拒绝、`_artifact_manifest` 与 `_inventory` 的多块哈希与 `hashlib` 逐字节一致）；workbench 侧新增 6 项（合法产物树仍被接受，深度/目录数/节点数/条目数/路径长度五类越界均在**哈希任何产物之前**拒绝）。另有两项既有测试的守卫从 `read_bounded_file` 改挂到 `_bounded_artifact_digest`——`_artifact_manifest` 已不再调用前者，不改守卫会让这两项**静默失效**。新增的越界用例经"把上限调至极大后必须转为失败"实测确认非空转。
+
+### 12.2 新发现 L1：静态 persisted-report fixture 依赖 PNG 编码器实现（中危，测试可移植性）
+
+**这是基线既存缺陷，与 12.1 的改动无关**——在改动前的基线 `93aec48` 上即可复现。
+
+`tests/test_gate_f_model_workbench.py` 的三项静态字节 fixture 测试在本机报错，均为同一条根因：
+
+| 测试 | 结果 |
+|---|---|
+| `test_loads_static_v03_persisted_reports_for_historical_v2_and_v3`（v2 与 v3 两个 subTest） | ERROR |
+| `test_loads_static_v04_persisted_report_for_historical_v4` | ERROR |
+
+报错一律是 `persisted model workbench report does not match validated evidence`。逐字段比对显示**差异全部集中在图层 PNG 产物的 `sha256`**：三个冻结报告都内嵌 `7eb0231bb990fadecd90787c8f069148f78dab682eb386b3990312457a10801c`，而本机重算得到 `c5248eb554b555edb7066f8af05665c635f869b514eda270fcc2f1be6a944b19`。
+
+根因：fixture 的 `_png()` 用 `PIL.Image.save(format="PNG")` 生成纯色图，**PNG 字节取决于 Pillow 链接的 zlib 实现**；而冻结报告把这些字节的摘要写死了。本机 Pillow 12.1.0 / zlib 1.3.1 下遍历 `compress_level` 0–9 与默认值均无法复现 `7eb0231b…`，可确认冻结值来自另一套 zlib 构建。v4 冻结块由 `057fb2d`（PR #4）引入，该 PR 只在 macOS 上验证过。
+
+判定：**测试 fixture 可移植性缺陷，不是生产代码缺陷**。loader 按设计独立重算并逐字段比对，行为正确；错的是 fixture 把环境相关的编码器输出当成了不变量。据此，仓库固定命令 `python -m unittest discover` 在非录制环境下不可能全绿，与 §4 P0-1"全绿，只允许平台性跳过"的验收标准冲突。
+
+**本轮已修复**。曾考虑的另一方案是让冻结块的产物摘要在测试期从实际 fixture 代入，但那会让摘要比对退化成同义反复——被比对的两侧都来自同一次重算，等于取消了对这些字段的校验。因此采用**把 fixture PNG 本身固化为常量字节**：
+
+- `_png()` 不再调用 `PIL.Image.save()`，改为解码两个内嵌常量（`_FIXTURE_RGBA_PNG_ZLIB_BASE64` / `_FIXTURE_GRAYSCALE_PNG_ZLIB_BASE64`），编码方式与文件既有的 `_legacy_workbench_report_v03_bytes` 同一约定（zlib + base64）。纯色 1280×1280 图的 PNG 再经 zlib 压缩后仅 193 / 142 字节，base64 后 260 / 192 字符，代价可忽略。固化后两张图在任何环境都解码为 `1280×1280` 的 `RGBA` / `L`，摘要恒为 `c5248eb5…` / `18fe745e…`。
+- 三个冻结报告块（`LEGACY_V2_…_V03`、`LEGACY_V3_…_V03`、`LEGACY_V4_…_V04`）据此重新冻结。它们仍是提交进仓库的**固定字节**、仍是 0.3.0 / 0.4.0 旧格式，因而完全保留"旧格式报告必须仍能被 loader 接受并投影到 0.5.0"的回归价值；差别只是这些字节从此在所有环境可复现。测试自带的版本/结构断言（`format_version`、`profile_id`、`entrypoint_attestation` 有无、`alpha_threshold` 为 31 等）未做任何放宽。
+- 注：`tests/test_gate_f_model_worker.py` 的 `_model_png()` 仍用 Pillow 编码。它不参与任何冻结摘要比对，本轮未改动；若日后要为 worker 侧也引入静态字节 fixture，需先同样固化。
+
+### 12.3 本轮验收状态（Linux 宿主）
+
+| 门 | 结果 |
+|---|---|
+| 立项文档 lint | ✅ 38 Markdown / 44 JSON |
+| 标准库合成编排 smoke | ✅ `status=succeeded` |
+| 本地技术预检 | ✅ `LOCAL_TECHNICAL_PREFLIGHT_PASS` + `GATE_F_NOT_EVALUATED` |
+| 完整 Pillow 套件（12.1 改动后、12.2 修复前） | 259 → **270 项**（+11 新测试），仍恰好 3 ERROR（全部为 L1），16 跳过——即加固改动**未引入任何新失败** |
+| 完整 Pillow 套件（12.1 + 12.2 全部落地后） | 见 12.5 |
+
+三次套件运行的错误集合逐项一致（同样三项静态 fixture 测试），据此可把 L1 与本轮加固改动完全解耦归因。
+
+### 12.4 P2-1 杂散文件已处置
+
+§4 所列四个未跟踪文件在本工作副本仍存在，且**均未被 `.gitignore` 覆盖**，离误提交只差一个 `git add -A`。本轮已确认内容：
+
+| 文件 | 实测内容 |
+|---|---|
+| `NUL`(63 B) | 一行 WSL socket 报错，`2>NUL` 重定向在 POSIX shell 下落成真实文件 |
+| `xaa`(0 B) | 空文件，`split` 残留 |
+| `converted.png`(380 KB) | 500×500 8-bit RGB PNG，来源不明 |
+| `-s`(1 MB) | **safetensors 格式权重分片**，首部为 `{"__metadata__":{"format":"pt"},"add_embedding.linear_1...` |
+
+后两者按 CLAUDE.md 分属"用户艺术资产"与"未批准权重"，**禁止入库**。处置方式选择**移出仓库而非删除**：四个文件已整体移到工作副本外的 `~/oc2d-stray-2026-08-02/`，误提交风险即刻消除，同时不销毁来源与权利不明的素材（删除不可逆，且 `-s` 与 `converted.png` 的归属未经确认）。仓库工作树现已干净。
+
+### 12.5 仍开放
+
+- **P1-2 真机链路**：本机是**原生 Ubuntu，不是 WSL**，无 `wsl.exe` / `powershell.exe`（虽有 RTX 5070 Ti），因此**无法**执行 active v5 的 `model → motion → model-candidate → verify-model-candidate`。该门仍必须在 Windows 主机 + 隔离 WSL2 GPU 上完成，仍是 Gate F 前唯一未收口的实测门。

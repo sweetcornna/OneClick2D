@@ -34,12 +34,14 @@ from spikes.gate_f_runner.model_worker import (
     MAX_MODEL_ARTIFACT_MANIFEST_NODES,
     MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES,
     MAX_MODEL_RESULT_BYTES,
+    MODEL_ARTIFACT_MANIFEST_HASH_CHUNK_BYTES,
     MODEL_PART_NAMES,
     MODEL_SEMANTIC_NAMES,
     NF4_MARIGOLD_DEVICE_POLICY_ID,
     PROFILE_ID,
     PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     _artifact_manifest,
+    _bounded_artifact_digest,
     _consume_entrypoint_attestation,
     _artifact_manifest_digest,
     _inventory,
@@ -730,6 +732,23 @@ class GateFModelWorkerTests(unittest.TestCase):
             with self.assertRaises(StageContractError):
                 _inventory(root)
 
+    def test_inventory_matches_hashlib_for_multi_chunk_files(self) -> None:
+        payload = bytes(range(241)) * 20 * 1024  # spans multiple read chunks
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "layer.png").write_bytes(payload)
+            files = _inventory(root)
+        self.assertEqual(
+            [
+                {
+                    "uri": "layer.png",
+                    "byte_length": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            ],
+            files,
+        )
+
     def test_artifact_manifest_rejects_entry_count_over_bound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -746,23 +765,23 @@ class GateFModelWorkerTests(unittest.TestCase):
             excess = root / "999-excess.bin"
             with excess.open("wb") as stream:
                 stream.truncate(MAX_MODEL_RESULT_BYTES)
-            real_read = read_bounded_file
+            real_digest = _bounded_artifact_digest
 
-            def guarded_read(path: Path, maximum: int = MAX_MODEL_RESULT_BYTES) -> bytes:
+            def guarded_digest(path: Path, maximum: int) -> tuple[str, int]:
                 if path == excess:
                     self.fail("cumulative bound must reject the excess file before reading it")
-                return real_read(path, maximum)
+                return real_digest(path, maximum)
 
             with mock.patch(
-                "spikes.gate_f_runner.model_worker.read_bounded_file",
-                side_effect=guarded_read,
+                "spikes.gate_f_runner.model_worker._bounded_artifact_digest",
+                side_effect=guarded_digest,
             ):
                 with self.assertRaisesRegex(StageContractError, "byte count exceeded"):
                     _artifact_manifest(root, root / ".entrypoint-attestation.json")
 
     def _assert_manifest_traversal_rejects(self, root: Path, pattern: str) -> None:
         with mock.patch(
-            "spikes.gate_f_runner.model_worker.read_bounded_file",
+            "spikes.gate_f_runner.model_worker._bounded_artifact_digest",
             side_effect=lambda *args, **kwargs: self.fail(
                 "traversal bounds must reject before any file is read"
             ),
@@ -818,6 +837,77 @@ class GateFModelWorkerTests(unittest.TestCase):
         self.assertEqual(
             ["000-result.psd", "001-extra.bin"],
             [item["path"] for item in manifest],
+        )
+
+    def test_bounded_artifact_digest_reads_in_bounded_chunks(self) -> None:
+        payload = bytes(range(256)) * 24 * 1024  # ~6 MiB, several chunks
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "artifact.bin"
+            target.write_bytes(payload)
+            requested: list[int] = []
+            real_open = Path.open
+
+            def recording_open(self_path: Path, *args: object, **kwargs: object) -> object:
+                stream = real_open(self_path, *args, **kwargs)
+                if self_path != target:
+                    return stream
+                real_read = stream.read
+
+                def recording_read(size: int = -1) -> bytes:
+                    requested.append(size)
+                    return real_read(size)
+
+                stream.read = recording_read  # type: ignore[method-assign]
+                return stream
+
+            with mock.patch.object(Path, "open", recording_open):
+                digest, byte_length = _bounded_artifact_digest(target, MAX_MODEL_RESULT_BYTES)
+
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), digest)
+        self.assertEqual(len(payload), byte_length)
+        self.assertTrue(requested, "the digest must stream the artifact")
+        self.assertLessEqual(
+            max(requested),
+            MODEL_ARTIFACT_MANIFEST_HASH_CHUNK_BYTES + 1,
+            "peak buffered bytes must stay at the fixed chunk bound, not the artifact size",
+        )
+
+    def test_bounded_artifact_digest_rejects_growth_past_its_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "artifact.bin"
+            target.write_bytes(b"a" * 4096)
+            with self.assertRaisesRegex(StageContractError, "byte count exceeded"):
+                _bounded_artifact_digest(target, 1024)
+
+    def test_bounded_artifact_digest_rejects_symlinked_artifact_when_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "artifact.bin").write_bytes(b"artifact")
+            link = root / "linked.bin"
+            try:
+                link.symlink_to(root / "artifact.bin")
+            except OSError:
+                self.skipTest("symlinks are unavailable")
+            with self.assertRaisesRegex(StageContractError, "non-regular node"):
+                _bounded_artifact_digest(link, MAX_MODEL_RESULT_BYTES)
+
+    def test_artifact_manifest_matches_hashlib_for_multi_chunk_artifacts(self) -> None:
+        payload = bytes(range(251)) * 20 * 1024  # spans multiple read chunks
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "000-result.psd").write_bytes(payload)
+            manifest = _artifact_manifest(root, root / ".entrypoint-attestation.json")
+        self.assertEqual(
+            [
+                {
+                    "path": "000-result.psd",
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "byte_length": len(payload),
+                }
+            ],
+            manifest,
         )
 
     def test_v5_entrypoint_manifest_bounds_match_worker_rules(self) -> None:

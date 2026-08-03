@@ -35,6 +35,11 @@ from .model_worker import (
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
     LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     LEGACY_UPSTREAM_COMMIT,
+    MAX_MODEL_ARTIFACT_MANIFEST_DEPTH,
+    MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES,
+    MAX_MODEL_ARTIFACT_MANIFEST_ENTRIES,
+    MAX_MODEL_ARTIFACT_MANIFEST_NODES,
+    MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES,
     MAX_MODEL_RESULT_BYTES,
     MODEL_PART_NAMES,
     PSD_PIXEL_PROJECTION_ALGORITHM_ID,
@@ -269,15 +274,24 @@ def _indexed_files(run_dir: Path, result: dict[str, object]) -> dict[str, tuple[
         descriptors[uri] = value
 
     actual: dict[str, Path] = {}
-    pending = [output_root]
+    directories = 0
+    nodes = 0
+    pending: list[tuple[Path, int]] = [(output_root, 0)]
     while pending:
-        directory = pending.pop()
+        directory, depth = pending.pop()
+        if depth > MAX_MODEL_ARTIFACT_MANIFEST_DEPTH:
+            raise StageContractError("model workbench output depth exceeded its bound")
         try:
             entries = sorted(directory.iterdir(), key=lambda path: path.name)
         except (OSError, RuntimeError) as exc:
             raise StageContractError("model workbench output contains an unsafe entry") from exc
         for path in entries:
             relative = path.relative_to(output_root).as_posix()
+            nodes += 1
+            if nodes > MAX_MODEL_ARTIFACT_MANIFEST_NODES:
+                raise StageContractError("model workbench output node count exceeded its bound")
+            if len(relative.encode("utf-8")) > MAX_MODEL_ARTIFACT_RELATIVE_PATH_BYTES:
+                raise StageContractError("model workbench output path length exceeded its bound")
             try:
                 info = path.lstat()
                 if stat.S_ISDIR(info.st_mode):
@@ -295,8 +309,15 @@ def _indexed_files(run_dir: Path, result: dict[str, object]) -> dict[str, tuple[
                 )
                 raise StageContractError(message) from exc
             if kind == "directory":
-                pending.append(path)
+                directories += 1
+                if directories > MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES:
+                    raise StageContractError(
+                        "model workbench output directory count exceeded its bound"
+                    )
+                pending.append((path, depth + 1))
             else:
+                if len(actual) >= MAX_MODEL_ARTIFACT_MANIFEST_ENTRIES:
+                    raise StageContractError("model workbench output entry count exceeded its bound")
                 actual[relative] = path
 
     described = set(descriptors)
