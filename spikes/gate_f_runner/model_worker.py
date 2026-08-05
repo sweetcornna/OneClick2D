@@ -25,8 +25,8 @@ from .runtime import canonical_json_bytes, read_bounded_file, sha256_bytes, stri
 
 PROFILE_ROOT = Path(__file__).with_name("model_profiles")
 ENTRYPOINT_ROOT = Path(__file__).with_name("model_entrypoints")
-DEVICE_POLICY_PATH = ENTRYPOINT_ROOT / "nf4_marigold_device_policy.py"
-PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v5"
+DEVICE_POLICY_PATH = ENTRYPOINT_ROOT / "nf4_marigold_device_policy_v6.py"
+PROFILE_ID = "see-through.v3.nf4.1280.source-preserve.v6"
 PROFILE_PATH = PROFILE_ROOT / "see-through-v3-nf4.json"
 LEGACY_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.v2"
 LEGACY_PROFILE_SHA256 = "14577459cc2e33aba3c0e74fd13f134aecfaaf45bb8acae96112182aa8239e35"
@@ -39,6 +39,12 @@ LEGACY_SOURCE_PRESERVE_ENTRYPOINT_SHA256 = "6b625faa99022f6edfa5faba97b23054331b
 LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v4"
 LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256 = "d24de59690e0db2c64828e580eed8b00f939d5327b255ef59f1826f8cf582ae3"
 LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256 = "ae4d26b042b8b15e7bdcfdacd11c50b16d97c1ccf19aad94162dd67046e1642f"
+LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID = "see-through.v3.nf4.1280.wsl2.source-preserve.v5"
+LEGACY_SOURCE_PRESERVE_V5_PROFILE_SHA256 = "e53049e5885419bd9d1d5c70d8b2514226ddcab9c33cdc8750d3f206401e4009"
+LEGACY_SOURCE_PRESERVE_V5_ENTRYPOINT_SHA256 = "8732db76c4fcf3f4bf7e94f3a206456ffbf9bd78ef773aa66d9b793c6f8f1ac5"
+LEGACY_SOURCE_PRESERVE_V5_NF4_MARIGOLD_DEVICE_POLICY_ID = (
+    "see-through.v4.nf4-marigold-bounded-offload.v1"
+)
 LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID = "see-through.v4.nf4-marigold-bounded-offload.v1"
 LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID = (
     "source-visible-rgb-by-depth-mask-clean.v2.psd-postcorrect.v1"
@@ -49,7 +55,7 @@ LEGACY_V4_ENTRYPOINT_COMPONENT_DISPOSITIONS = (
     ("text_encoder", "cached-and-released"),
 )
 SOURCE_PRESERVE_ALGORITHM_ID = "source-visible-rgb-by-depth-mask-clean.v2"
-NF4_MARIGOLD_DEVICE_POLICY_ID = "see-through.v4.nf4-marigold-bounded-offload.v1"
+NF4_MARIGOLD_DEVICE_POLICY_ID = "see-through.v6.nf4-marigold-bounded-offload.v2"
 PSD_PIXEL_PROJECTION_ALGORITHM_ID = f"{SOURCE_PRESERVE_ALGORITHM_ID}.psd-postcorrect.v1"
 ENTRYPOINT_COMPONENT_DISPOSITIONS = (
     ("vae", "sequential-cpu-offload"),
@@ -110,6 +116,7 @@ RUNTIME_PACKAGE_NAMES = (
     "opencv-python",
     "pillow",
     "psd-tools",
+    "pycocotools",
     "pyyaml",
     "safetensors",
     "scikit-image",
@@ -121,9 +128,11 @@ RUNTIME_PACKAGE_NAMES = (
     "torchvision",
     "transformers",
 )
-RUNTIME_ATTESTATION_CODE = """import importlib.metadata as m,json,platform,torch
+RUNTIME_ATTESTATION_CODE = """import importlib.metadata as m,json,os,platform,sys,torch
 names=json.loads(__import__('os').environ['ONECLICK2D_PACKAGE_NAMES'])
-result={'python':platform.python_version(),'torch':torch.__version__,'cuda':torch.version.cuda,'cuda_available':torch.cuda.is_available(),'packages':{name:m.version(name) for name in names}}
+requested=json.loads(os.environ['ONECLICK2D_PYTHON_PATH_ENTRIES'])
+effective={os.path.realpath(value) for value in sys.path}
+result={'python':platform.python_version(),'torch':torch.__version__,'cuda':torch.version.cuda,'cuda_available':torch.cuda.is_available(),'packages':{name:m.version(name) for name in names},'python_path_entries_effective':all(os.path.realpath(value) in effective for value in requested)}
 try:
  result['timm_direct_url']=json.loads(m.distribution('timm').read_text('direct_url.json') or 'null')
 except (FileNotFoundError,TypeError,ValueError):
@@ -137,6 +146,7 @@ def _load_profile() -> tuple[dict[str, object], bytes]:
     profile = strict_load_json_bytes(exact)
     if not isinstance(profile, dict) or profile.get("profile_id") != PROFILE_ID:
         raise StageContractError("model spike profile is invalid")
+    _runtime(profile)
     return profile, exact
 
 
@@ -154,24 +164,96 @@ def _wsl_path(path: Path, distribution: str) -> str:
     return value
 
 
-def _runtime(profile: dict[str, object]) -> tuple[str, str, str]:
+def _runtime(profile: dict[str, object]) -> dict[str, object]:
     runtime = profile.get("runtime")
     if not isinstance(runtime, dict):
         raise StageContractError("model worker runtime profile is invalid")
-    distribution = runtime.get("distribution")
-    root = runtime.get("code_root_relative_to_home")
-    python = runtime.get("python_relative_to_code_root")
-    if not all(isinstance(value, str) and value for value in (distribution, root, python)):
+    kind = runtime.get("kind")
+    common_keys = {
+        "kind",
+        "isolation",
+        "code_root_relative_to_home",
+        "python_relative_to_code_root",
+        "python_path_entries",
+        "python_version",
+        "torch_version",
+        "cuda_version",
+        "dependencies_profile",
+        "dependencies_sha256",
+        "timm_commit",
+        "versions",
+    }
+    if kind == "native-linux":
+        expected_keys = common_keys | {"isolation_notice"}
+        identity_is_valid = (
+            runtime.get("isolation") == "none-host-local"
+            and runtime.get("isolation_notice") == "无隔离边界、仅限本机"
+        )
+    elif kind == "wsl2":
+        expected_keys = common_keys | {"distribution"}
+        identity_is_valid = (
+            runtime.get("isolation") == "wsl2-vm"
+            and isinstance(runtime.get("distribution"), str)
+            and bool(runtime.get("distribution"))
+        )
+    else:
+        raise StageContractError("model worker runtime kind is invalid")
+    if set(runtime) != expected_keys or not identity_is_valid:
         raise StageContractError("model worker runtime identity is invalid")
-    if any(".." in Path(value).parts for value in (root, python)):
+
+    relative_paths = (
+        runtime.get("code_root_relative_to_home"),
+        runtime.get("python_relative_to_code_root"),
+    )
+    if any(
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or Path(value).is_absolute()
+        or "." in Path(value).parts
+        or ".." in Path(value).parts
+        for value in relative_paths
+    ):
+        raise StageContractError("model worker runtime identity is invalid")
+    python_path_entries = runtime.get("python_path_entries")
+    if (
+        not isinstance(python_path_entries, list)
+        or not python_path_entries
+        or len(python_path_entries) != len(set(python_path_entries))
+        or any(
+            not isinstance(value, str)
+            or not value
+            or "\\" in value
+            or Path(value).is_absolute()
+            or "." in Path(value).parts
+            or ".." in Path(value).parts
+            for value in python_path_entries
+        )
+    ):
         raise StageContractError("model worker runtime path is invalid")
-    return distribution, root, python
+    dependencies_profile = runtime.get("dependencies_profile")
+    if (
+        not isinstance(dependencies_profile, str)
+        or not dependencies_profile
+        or Path(dependencies_profile).name != dependencies_profile
+        or not _is_sha256(runtime.get("dependencies_sha256"))
+    ):
+        raise StageContractError("model dependency profile identity is invalid")
+    timm_commit = runtime.get("timm_commit")
+    if (
+        not isinstance(timm_commit, str)
+        or len(timm_commit) != 40
+        or any(character not in "0123456789abcdef" for character in timm_commit)
+    ):
+        raise StageContractError("model timm identity is invalid")
+    return runtime
 
 
 def _validated_profile_entrypoint(
     profile: dict[str, object],
     *,
     expected_device_policy_name: str | None,
+    expected_device_policy_id: str | None,
 ) -> Path:
     entrypoint = profile.get("entrypoint")
     if not isinstance(entrypoint, dict) or set(entrypoint) != {
@@ -194,12 +276,17 @@ def _validated_profile_entrypoint(
     ):
         raise StageContractError("model entrypoint identity is invalid")
     path = ENTRYPOINT_ROOT / relative
+    if path.is_symlink() or not path.is_file():
+        raise StageContractError("model entrypoint is invalid")
     exact = read_bounded_file(path, 256 * 1024)
     if sha256_bytes(exact) != expected_digest:
         raise StageContractError("model entrypoint digest mismatch")
 
     device_policy = entrypoint.get("device_policy")
-    if not isinstance(device_policy, dict) or set(device_policy) != {"path", "sha256"}:
+    expected_policy_keys = {"path", "sha256"}
+    if expected_device_policy_id is not None:
+        expected_policy_keys.add("policy_id")
+    if not isinstance(device_policy, dict) or set(device_policy) != expected_policy_keys:
         raise StageContractError("model entrypoint device policy profile is invalid")
     policy_relative = device_policy.get("path")
     policy_digest = device_policy.get("sha256")
@@ -208,12 +295,19 @@ def _validated_profile_entrypoint(
         or Path(policy_relative).name != policy_relative
         or not policy_relative
         or (expected_device_policy_name is not None and policy_relative != expected_device_policy_name)
+        or (
+            expected_device_policy_id is not None
+            and device_policy.get("policy_id") != expected_device_policy_id
+        )
         or not isinstance(policy_digest, str)
         or len(policy_digest) != 64
         or any(character not in "0123456789abcdef" for character in policy_digest)
     ):
         raise StageContractError("model entrypoint device policy identity is invalid")
-    policy_exact = read_bounded_file(ENTRYPOINT_ROOT / policy_relative, 256 * 1024)
+    policy_path = ENTRYPOINT_ROOT / policy_relative
+    if policy_path.is_symlink() or not policy_path.is_file():
+        raise StageContractError("model entrypoint device policy is invalid")
+    policy_exact = read_bounded_file(policy_path, 256 * 1024)
     if sha256_bytes(policy_exact) != policy_digest:
         raise StageContractError("model entrypoint device policy digest mismatch")
     return path
@@ -223,11 +317,16 @@ def _validated_entrypoint(profile: dict[str, object]) -> Path:
     return _validated_profile_entrypoint(
         profile,
         expected_device_policy_name=DEVICE_POLICY_PATH.name,
+        expected_device_policy_id=NF4_MARIGOLD_DEVICE_POLICY_ID,
     )
 
 
 def _validated_archived_entrypoint(profile: dict[str, object]) -> Path:
-    return _validated_profile_entrypoint(profile, expected_device_policy_name=None)
+    return _validated_profile_entrypoint(
+        profile,
+        expected_device_policy_name=None,
+        expected_device_policy_id=None,
+    )
 
 
 def _run_checked(
@@ -236,14 +335,25 @@ def _run_checked(
     timeout: int,
     output_limit: int = 4096,
     env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-    )
+    if cwd is None:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    else:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=cwd,
+        )
     streams = ((process.stdout, bytearray()), (process.stderr, bytearray()))
     exceeded = threading.Event()
 
@@ -300,11 +410,88 @@ def _runtime_versions(runtime: dict[str, object]) -> dict[str, str]:
     return result
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _native_code_root(runtime: dict[str, object]) -> Path:
+    relative = runtime.get("code_root_relative_to_home")
+    if not isinstance(relative, str):
+        raise StageContractError("model worker native code root is invalid")
+    home = Path.home().resolve()
+    candidate = Path.home() / relative
+    if candidate.is_symlink() or not candidate.is_dir():
+        raise StageContractError("model worker native code root is invalid")
+    resolved = candidate.resolve()
+    if not _is_within(resolved, home):
+        raise StageContractError("model worker native code root is outside the allowed root")
+    return resolved
+
+
+def _native_member(
+    root: Path,
+    relative: str,
+    *,
+    expect_directory: bool = False,
+) -> Path:
+    candidate = root / relative
+    current = root
+    for part in Path(relative).parts:
+        current /= part
+        if current.is_symlink():
+            raise StageContractError("model worker native path contains a symlink")
+    resolved = candidate.resolve()
+    if not _is_within(resolved, root):
+        raise StageContractError("model worker native path is outside the allowed root")
+    if expect_directory:
+        if not resolved.is_dir():
+            raise StageContractError("model worker native directory is invalid")
+    elif not resolved.is_file():
+        raise StageContractError("model worker native file is invalid")
+    return resolved
+
+
+def _native_python(runtime: dict[str, object], code_root: Path) -> Path:
+    relative = runtime.get("python_relative_to_code_root")
+    if not isinstance(relative, str):
+        raise StageContractError("model worker native Python identity is invalid")
+    candidate = code_root / relative
+    current = code_root
+    for part in Path(relative).parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise StageContractError("model worker native Python path contains a symlink")
+    if not candidate.is_file():
+        raise StageContractError("model worker native Python identity is invalid")
+    return candidate.absolute()
+
+
+def _native_python_path_entries(runtime: dict[str, object], code_root: Path) -> list[Path]:
+    entries = runtime.get("python_path_entries")
+    if not isinstance(entries, list):
+        raise StageContractError("model worker Python path profile is invalid")
+    return [
+        _native_member(code_root, entry, expect_directory=True)
+        for entry in entries
+        if isinstance(entry, str)
+    ]
+
+
+def _native_path(path: Path, *, allowed_root: Path | None = None) -> str:
+    if path.is_symlink():
+        raise StageContractError("model worker native path contains a symlink")
+    resolved = path.resolve()
+    if allowed_root is not None and not _is_within(resolved, allowed_root.resolve()):
+        raise StageContractError("model worker native path is outside the allowed root")
+    return resolved.as_posix()
+
+
 def _verify_runtime(profile: dict[str, object], dependencies_sha256: str) -> None:
-    distribution, root, python = _runtime(profile)
-    runtime = profile.get("runtime")
-    if not isinstance(runtime, dict):
-        raise StageContractError("model worker runtime profile is invalid")
+    runtime = _runtime(profile)
     if dependencies_sha256 != runtime.get("dependencies_sha256"):
         raise StageContractError("model dependency profile mismatch")
     expected = {
@@ -312,23 +499,56 @@ def _verify_runtime(profile: dict[str, object], dependencies_sha256: str) -> Non
         "torch": runtime.get("torch_version"),
         "cuda": runtime.get("cuda_version"),
         "packages": _runtime_versions(runtime),
+        "python_path_entries_effective": True,
     }
     if not all(isinstance(expected[key], str) and expected[key] for key in ("python", "torch", "cuda")):
         raise StageContractError("model runtime version identity is invalid")
-    command = [
-        "wsl.exe",
-        "-d",
-        distribution,
-        "--cd",
-        f"~/{root}",
-        "--",
-        "env",
-        f"ONECLICK2D_PACKAGE_NAMES={json.dumps(RUNTIME_PACKAGE_NAMES, separators=(',', ':'))}",
-        f"./{python}",
-        "-c",
-        RUNTIME_ATTESTATION_CODE,
-    ]
-    completed = _run_checked(command, timeout=120, output_limit=64 * 1024)
+    python_path_entries = runtime["python_path_entries"]
+    if runtime["kind"] == "wsl2":
+        distribution = str(runtime["distribution"])
+        root = str(runtime["code_root_relative_to_home"])
+        python = str(runtime["python_relative_to_code_root"])
+        command = [
+            "wsl.exe",
+            "-d",
+            distribution,
+            "--cd",
+            f"~/{root}",
+            "--",
+            "env",
+            f"ONECLICK2D_PACKAGE_NAMES={json.dumps(RUNTIME_PACKAGE_NAMES, separators=(',', ':'))}",
+            f"ONECLICK2D_PYTHON_PATH_ENTRIES={json.dumps(python_path_entries, separators=(',', ':'))}",
+            f"./{python}",
+            "-c",
+            RUNTIME_ATTESTATION_CODE,
+        ]
+        completed = _run_checked(command, timeout=120, output_limit=64 * 1024)
+    else:
+        code_root = _native_code_root(runtime)
+        python = _native_python(runtime, code_root)
+        native_python_paths = _native_python_path_entries(runtime, code_root)
+        process_env = os.environ.copy()
+        process_env.pop("WSLENV", None)
+        process_env.pop("PYTHONPATH", None)
+        process_env.update(
+            {
+                "ONECLICK2D_PACKAGE_NAMES": json.dumps(
+                    RUNTIME_PACKAGE_NAMES,
+                    separators=(",", ":"),
+                ),
+                "ONECLICK2D_PYTHON_PATH_ENTRIES": json.dumps(
+                    [path.as_posix() for path in native_python_paths],
+                    separators=(",", ":"),
+                ),
+            }
+        )
+        completed = _run_checked(
+            [python.as_posix(), "-c", RUNTIME_ATTESTATION_CODE],
+            timeout=120,
+            output_limit=64 * 1024,
+            env=process_env,
+            cwd=code_root,
+        )
     if completed.returncode != 0:
         raise StageContractError("model runtime attestation failed")
     try:
@@ -354,7 +574,11 @@ def _verify_runtime(profile: dict[str, object], dependencies_sha256: str) -> Non
 
 
 def _verify_wsl_models(profile: dict[str, object]) -> None:
-    distribution, root, _ = _runtime(profile)
+    runtime = _runtime(profile)
+    if runtime.get("kind") != "wsl2":
+        raise StageContractError("model worker WSL strategy does not match the runtime profile")
+    distribution = str(runtime["distribution"])
+    root = str(runtime["code_root_relative_to_home"])
     models = profile.get("models")
     if not isinstance(models, list) or len(models) != 3:
         raise StageContractError("model inventory is invalid")
@@ -485,6 +709,275 @@ def _verify_wsl_models(profile: dict[str, object]) -> None:
             if actual_length != expected_length:
                 raise StageContractError("model weight size mismatch")
 
+    scheduler, resolution = _scheduler_resolution(profile)
+    configs = scheduler.get("config_files")
+    if not isinstance(configs, list) or len(configs) != 1 or not isinstance(configs[0], dict):
+        raise StageContractError("model scheduler cache inventory is invalid")
+    config = configs[0]
+    config_relative = config.get("path")
+    expected_config_digest = config.get("git_blob_sha1")
+    if not isinstance(config_relative, str) or not isinstance(expected_config_digest, str):
+        raise StageContractError("model scheduler cache file identity is invalid")
+    cache_root = (
+        f"{resolution['hf_home_relative_to_code_root']}/hub/{resolution['cache_repository']}"
+    )
+    ref = _run_checked(
+        [
+            "wsl.exe",
+            "-d",
+            distribution,
+            "--cd",
+            f"~/{root}",
+            "--",
+            "cat",
+            f"{cache_root}/{resolution['required_ref']}",
+        ],
+        timeout=30,
+        output_limit=128,
+    )
+    if (
+        ref.returncode != 0
+        or ref.stdout.decode("ascii", errors="strict").strip() != resolution["resolved_commit"]
+    ):
+        raise StageContractError("model scheduler cache ref mismatch")
+    snapshot = f"{cache_root}/snapshots/{resolution['resolved_commit']}/{config_relative}"
+    cached_config = _run_checked(
+        [
+            "wsl.exe",
+            "-d",
+            distribution,
+            "--cd",
+            f"~/{root}",
+            "--",
+            "git",
+            "hash-object",
+            snapshot,
+        ],
+        timeout=30,
+        output_limit=128,
+    )
+    if (
+        cached_config.returncode != 0
+        or cached_config.stdout.decode("ascii", errors="strict").strip()
+        != expected_config_digest
+    ):
+        raise StageContractError("model scheduler cache file digest mismatch")
+
+
+def _scheduler_resolution(profile: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    models = profile.get("models")
+    if not isinstance(models, list):
+        raise StageContractError("model scheduler inventory is invalid")
+    schedulers = [
+        model
+        for model in models
+        if isinstance(model, dict) and model.get("role") == "scheduler_configuration"
+    ]
+    if len(schedulers) != 1:
+        raise StageContractError("model scheduler inventory is invalid")
+    scheduler = schedulers[0]
+    resolution = scheduler.get("runtime_resolution")
+    if not isinstance(resolution, dict) or set(resolution) != {
+        "kind",
+        "repo_id",
+        "revision",
+        "subfolder",
+        "hf_home_relative_to_code_root",
+        "cache_repository",
+        "required_ref",
+        "resolved_commit",
+    }:
+        raise StageContractError("model scheduler resolution profile is invalid")
+    if (
+        resolution.get("kind") != "huggingface-hub-cache"
+        or resolution.get("repo_id") != scheduler.get("repository")
+        or resolution.get("revision") != "main"
+        or resolution.get("subfolder") != "scheduler"
+        or resolution.get("hf_home_relative_to_code_root") != "models/hf-cache"
+        or resolution.get("cache_repository")
+        != "models--frankjoshua--juggernautXL_version6Rundiffusion"
+        or resolution.get("required_ref") != "refs/main"
+        or resolution.get("resolved_commit") != scheduler.get("revision")
+    ):
+        raise StageContractError("model scheduler resolution identity is invalid")
+    return scheduler, resolution
+
+
+def _git_blob_digest(path: Path, maximum: int = 64 * 1024 * 1024) -> str:
+    try:
+        size = path.stat(follow_symlinks=False).st_size
+        if size < 0 or size > maximum:
+            raise StageContractError("model config file exceeded its bound")
+        digest = hashlib.sha1(f"blob {size}\0".encode("ascii"), usedforsecurity=False)
+        byte_length = 0
+        with path.open("rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise StageContractError("model file is not regular")
+            while chunk := stream.read(min(1024 * 1024, size - byte_length + 1)):
+                byte_length += len(chunk)
+                if byte_length > size:
+                    raise StageContractError("model file changed while hashing")
+                digest.update(chunk)
+        if byte_length != size:
+            raise StageContractError("model file changed while hashing")
+    except OSError as exc:
+        raise StageContractError("model config file verification failed") from exc
+    return digest.hexdigest()
+
+
+def _sha256_native_model_file(path: Path, expected_length: int) -> str:
+    try:
+        size = path.stat(follow_symlinks=False).st_size
+        if size != expected_length:
+            raise StageContractError("model weight size mismatch")
+        digest = hashlib.sha256()
+        byte_length = 0
+        with path.open("rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise StageContractError("model file is not regular")
+            while chunk := stream.read(min(1024 * 1024, expected_length - byte_length + 1)):
+                byte_length += len(chunk)
+                if byte_length > expected_length:
+                    raise StageContractError("model weight size mismatch")
+                digest.update(chunk)
+        if byte_length != expected_length:
+            raise StageContractError("model weight size mismatch")
+    except OSError as exc:
+        raise StageContractError("model file verification failed") from exc
+    return digest.hexdigest()
+
+
+def _verify_native_scheduler_cache(
+    profile: dict[str, object],
+    code_root: Path,
+) -> None:
+    scheduler, resolution = _scheduler_resolution(profile)
+    commit = str(resolution["resolved_commit"])
+    hf_home = _native_member(
+        code_root,
+        str(resolution["hf_home_relative_to_code_root"]),
+        expect_directory=True,
+    )
+    cache_root = _native_member(
+        hf_home,
+        f"hub/{resolution['cache_repository']}",
+        expect_directory=True,
+    )
+    ref = _native_member(cache_root, str(resolution["required_ref"]))
+    try:
+        if read_bounded_file(ref, 128).decode("ascii", errors="strict").strip() != commit:
+            raise StageContractError("model scheduler cache ref mismatch")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise StageContractError("model scheduler cache ref is invalid") from exc
+
+    configs = scheduler.get("config_files")
+    if not isinstance(configs, list) or len(configs) != 1 or not isinstance(configs[0], dict):
+        raise StageContractError("model scheduler cache inventory is invalid")
+    descriptor = configs[0]
+    relative = descriptor.get("path")
+    expected_digest = descriptor.get("git_blob_sha1")
+    if not isinstance(relative, str) or not isinstance(expected_digest, str):
+        raise StageContractError("model scheduler cache file identity is invalid")
+    blob = _native_member(cache_root, f"blobs/{expected_digest}")
+    if _git_blob_digest(blob) != expected_digest:
+        raise StageContractError("model scheduler cache file digest mismatch")
+    snapshot = cache_root / "snapshots" / commit / relative
+    if not snapshot.exists():
+        raise StageContractError("model scheduler cache snapshot is missing")
+    resolved_snapshot = snapshot.resolve()
+    if resolved_snapshot != blob or not _is_within(resolved_snapshot, cache_root):
+        raise StageContractError("model scheduler cache snapshot is invalid")
+
+
+def _verify_native_models(profile: dict[str, object]) -> None:
+    runtime = _runtime(profile)
+    if runtime.get("kind") != "native-linux":
+        raise StageContractError("model worker native strategy does not match the runtime profile")
+    code_root = _native_code_root(runtime)
+    models = profile.get("models")
+    if not isinstance(models, list) or len(models) != 3:
+        raise StageContractError("model inventory is invalid")
+    code = profile.get("code")
+    if not isinstance(code, dict) or not isinstance(code.get("commit"), str):
+        raise StageContractError("model code identity is invalid")
+    revision = _run_checked(["git", "rev-parse", "HEAD"], timeout=30, cwd=code_root)
+    if revision.returncode != 0 or revision.stdout.decode("ascii", errors="strict").strip() != code["commit"]:
+        raise StageContractError("model code revision mismatch")
+    tracked_status = _run_checked(
+        ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+        timeout=30,
+        output_limit=64 * 1024,
+        cwd=code_root,
+    )
+    if tracked_status.returncode != 0 or tracked_status.stdout.strip():
+        raise StageContractError("model code checkout has tracked changes")
+
+    entrypoint = profile.get("entrypoint")
+    upstream_script = entrypoint.get("upstream_script") if isinstance(entrypoint, dict) else None
+    if not isinstance(upstream_script, str):
+        raise StageContractError("model upstream entrypoint identity is invalid")
+    upstream_path = _native_member(code_root, upstream_script)
+    committed_entrypoint = _run_checked(
+        ["git", "rev-parse", f"{code['commit']}:{upstream_script}"],
+        timeout=30,
+        output_limit=128,
+        cwd=code_root,
+    )
+    actual_entrypoint = _run_checked(
+        ["git", "hash-object", "--", upstream_path.relative_to(code_root).as_posix()],
+        timeout=30,
+        output_limit=128,
+        cwd=code_root,
+    )
+    try:
+        committed_digest = committed_entrypoint.stdout.decode("ascii", errors="strict").strip()
+        actual_digest = actual_entrypoint.stdout.decode("ascii", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        raise StageContractError("model upstream entrypoint digest is invalid") from exc
+    if (
+        committed_entrypoint.returncode != 0
+        or actual_entrypoint.returncode != 0
+        or len(committed_digest) != 40
+        or any(character not in "0123456789abcdef" for character in committed_digest)
+        or actual_digest != committed_digest
+    ):
+        raise StageContractError("model upstream entrypoint does not match the pinned commit")
+
+    for model in models:
+        if not isinstance(model, dict):
+            raise StageContractError("model local inventory is invalid")
+        local_dir = model.get("local_dir_relative_to_code_root")
+        configs = model.get("config_files")
+        weights = model.get("weights")
+        if not isinstance(local_dir, str) or not isinstance(configs, list) or not isinstance(weights, list):
+            raise StageContractError("model file inventory is invalid")
+        model_root = _native_member(code_root, local_dir, expect_directory=True)
+        for descriptor in (*configs, *weights):
+            if not isinstance(descriptor, dict):
+                raise StageContractError("model file identity is invalid")
+            relative = descriptor.get("path")
+            if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                raise StageContractError("model file path is invalid")
+            path = _native_member(model_root, relative)
+            if "sha256" in descriptor:
+                expected_digest = descriptor.get("sha256")
+                expected_length = descriptor.get("byte_length")
+                if (
+                    not isinstance(expected_digest, str)
+                    or isinstance(expected_length, bool)
+                    or not isinstance(expected_length, int)
+                ):
+                    raise StageContractError("model weight identity is invalid")
+                actual_digest = _sha256_native_model_file(path, expected_length)
+            else:
+                expected_digest = descriptor.get("git_blob_sha1")
+                if not isinstance(expected_digest, str):
+                    raise StageContractError("model config identity is invalid")
+                actual_digest = _git_blob_digest(path)
+            if actual_digest != expected_digest:
+                raise StageContractError("model file digest mismatch")
+    _verify_native_scheduler_cache(profile, code_root)
+
 
 def _invoke_wsl(
     source: Path,
@@ -492,7 +985,12 @@ def _invoke_wsl(
     profile: dict[str, object],
     timeout_seconds: int,
 ) -> tuple[subprocess.CompletedProcess[bytes], Mapping[str, object] | None]:
-    distribution, root, python = _runtime(profile)
+    runtime = _runtime(profile)
+    if runtime.get("kind") != "wsl2":
+        raise StageContractError("model worker WSL strategy does not match the runtime profile")
+    distribution = str(runtime["distribution"])
+    root = str(runtime["code_root_relative_to_home"])
+    python = str(runtime["python_relative_to_code_root"])
     _verify_wsl_models(profile)
     inference = _validated_inference(profile)
     _validated_postprocess(profile)
@@ -587,6 +1085,135 @@ def _invoke_wsl(
     return completed, attestation
 
 
+def _invoke_native(
+    source: Path,
+    output: Path,
+    profile: dict[str, object],
+    timeout_seconds: int,
+) -> tuple[subprocess.CompletedProcess[bytes], Mapping[str, object] | None]:
+    runtime = _runtime(profile)
+    if runtime.get("kind") != "native-linux":
+        raise StageContractError("model worker native strategy does not match the runtime profile")
+    code_root = _native_code_root(runtime)
+    python = _native_python(runtime, code_root)
+    python_path_entries = _native_python_path_entries(runtime, code_root)
+    hf_home = _native_member(code_root, "models/hf-cache", expect_directory=True)
+    _verify_native_models(profile)
+    inference = _validated_inference(profile)
+    _validated_postprocess(profile)
+    entrypoint = _validated_entrypoint(profile)
+    models = profile.get("models")
+    if not isinstance(models, list) or len(models) != 3:
+        raise StageContractError("model inference profile is invalid")
+    local_models: dict[str, str] = {}
+    for model in models:
+        if not isinstance(model, dict):
+            raise StageContractError("model identity is invalid")
+        role = model.get("role")
+        local_dir = model.get("local_dir_relative_to_code_root")
+        if (
+            not isinstance(role, str)
+            or not isinstance(local_dir, str)
+            or Path(local_dir).is_absolute()
+            or ".." in Path(local_dir).parts
+        ):
+            raise StageContractError("model local directory is invalid")
+        if role in local_models:
+            raise StageContractError("model role is duplicated")
+        local_models[role] = local_dir
+    if set(local_models) != {
+        "scheduler_configuration",
+        "semantic_layer_generation",
+        "semantic_layer_depth",
+    }:
+        raise StageContractError("model role inventory is invalid")
+
+    if output.is_symlink() or not output.is_dir():
+        raise StageContractError("model worker native output root is invalid")
+    source_native = _native_path(source, allowed_root=source.parent)
+    entrypoint_native = _native_path(entrypoint, allowed_root=ENTRYPOINT_ROOT)
+    attestation_challenge = secrets.token_hex(32)
+    inference_output = output / "input"
+    inference_output.mkdir()
+    output_native = _native_path(inference_output, allowed_root=output)
+    attestation_path = inference_output / ".entrypoint-attestation.json"
+    command = [
+        python.as_posix(),
+        entrypoint_native,
+        "--save_dir",
+        output_native,
+        "--save_to_psd",
+        "--tblr_split",
+        "--quant_mode",
+        str(inference.get("quantization")),
+        "--repo_id_layerdiff",
+        local_models["semantic_layer_generation"],
+        "--repo_id_depth",
+        local_models["semantic_layer_depth"],
+        "--seed",
+        str(inference.get("seed")),
+        "--resolution",
+        str(inference.get("resolution")),
+        "--resolution_depth",
+        str(inference.get("depth_resolution")),
+        "--num_inference_steps",
+        str(inference.get("inference_steps")),
+    ]
+    if inference.get("cpu_offload") is True:
+        command.append("--cpu_offload")
+    if inference.get("group_offload") is True:
+        command.append("--group_offload")
+    else:
+        command.append("--no_group_offload")
+    process_env = os.environ.copy()
+    process_env.pop("WSLENV", None)
+    process_env.pop("PYTHONPATH", None)
+    process_env.update(
+        {
+            "HF_HUB_DISABLE_TELEMETRY": "1",
+            "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+            "HF_HOME": hf_home.as_posix(),
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "TRANSFORMERS_NO_ADVISORY_WARNINGS": "1",
+            "DO_NOT_TRACK": "1",
+            "PYTORCH_CUDA_ALLOC_CONF": str(inference.get("cuda_allocator")),
+            "ONECLICK2D_ENTRYPOINT_ATTESTATION": attestation_path.resolve().as_posix(),
+            "ONECLICK2D_ATTESTATION_CHALLENGE": attestation_challenge,
+            "ONECLICK2D_ATTESTATION_SOURCE": source_native,
+        }
+    )
+    completed = _run_checked(
+        command,
+        timeout=timeout_seconds,
+        output_limit=MAX_MODEL_STDIO_BYTES,
+        env=process_env,
+        cwd=code_root,
+    )
+    attestation = (
+        _consume_entrypoint_attestation(
+            attestation_path,
+            expected_challenge=attestation_challenge,
+            source=source,
+        )
+        if completed.returncode == 0
+        else None
+    )
+    return completed, attestation
+
+
+def _invoke_model(
+    source: Path,
+    output: Path,
+    profile: dict[str, object],
+    timeout_seconds: int,
+) -> tuple[subprocess.CompletedProcess[bytes], Mapping[str, object] | None]:
+    runtime = _runtime(profile)
+    if runtime["kind"] == "wsl2":
+        return _invoke_wsl(source, output, profile, timeout_seconds)
+    return _invoke_native(source, output, profile, timeout_seconds)
+
+
 _ENTRYPOINT_ATTESTATION_SUMMARY_KEYS = {
     "policy_id",
     "requested_cpu_offload",
@@ -612,6 +1239,7 @@ def _validated_device_attestation_summary(
     policy_id: str,
     psd_projection_algorithm_id: str,
     component_dispositions: tuple[tuple[str, str], ...],
+    allow_missing_hook_devices: bool = False,
 ) -> Mapping[str, object]:
     if (
         not isinstance(value, Mapping)
@@ -640,12 +1268,20 @@ def _validated_device_attestation_summary(
             raise StageContractError("model entrypoint device attestation is invalid")
         storage = component.get("storage_devices")
         hooks = component.get("execution_hook_devices")
+        valid_hooks = (
+            isinstance(hooks, (list, tuple))
+            and all(
+                (allow_missing_hook_devices and device is None)
+                or (isinstance(device, str) and bool(device))
+                for device in hooks
+            )
+        )
         if (
             not isinstance(storage, (list, tuple))
-            or not isinstance(hooks, (list, tuple))
-            or any(not isinstance(device, str) or not device for device in (*storage, *hooks))
+            or any(not isinstance(device, str) or not device for device in storage)
+            or not valid_hooks
             or list(storage) != sorted(set(storage))
-            or list(hooks) != sorted(set(hooks))
+            or list(hooks) != sorted(set(hooks), key=lambda device: "" if device is None else device)
             or not isinstance(component.get("upstream_cuda_move_suppressed"), bool)
             or component.get("disposition") != disposition
         ):
@@ -662,11 +1298,14 @@ def _validated_device_attestation_summary(
     unet = frozen_components["unet"]
     text_encoder = frozen_components["text_encoder"]
     is_cuda = lambda device: device == "cuda" or device.startswith("cuda:")
+    vae_execution_devices = tuple(
+        device for device in vae["execution_hook_devices"] if device is not None
+    )
     if (
         vae["upstream_cuda_move_suppressed"] is not True
         or any(is_cuda(device) for device in vae["storage_devices"])
-        or not vae["execution_hook_devices"]
-        or not all(device == execution_device for device in vae["execution_hook_devices"])
+        or not vae_execution_devices
+        or not all(device == execution_device for device in vae_execution_devices)
         or unet["upstream_cuda_move_suppressed"] is not True
         or not unet["storage_devices"]
         or not all(device == execution_device for device in unet["storage_devices"])
@@ -692,6 +1331,7 @@ def _validated_entrypoint_attestation_summary(value: object) -> Mapping[str, obj
         policy_id=NF4_MARIGOLD_DEVICE_POLICY_ID,
         psd_projection_algorithm_id=PSD_PIXEL_PROJECTION_ALGORITHM_ID,
         component_dispositions=ENTRYPOINT_COMPONENT_DISPOSITIONS,
+        allow_missing_hook_devices=True,
     )
     if not isinstance(value, Mapping):
         raise StageContractError("model entrypoint attestation is invalid")
@@ -1292,7 +1932,7 @@ def run_model_worker(source: Path, output_root: Path, *, timeout_seconds: int = 
     local_source = Path(tempfile.mkdtemp(prefix="source-", dir=output_root.parent)) / "input.png"
     local_source.write_bytes(source_bytes)
     try:
-        completed, entrypoint_attestation = _invoke_wsl(local_source, output_root, profile, timeout_seconds)
+        completed, entrypoint_attestation = _invoke_model(local_source, output_root, profile, timeout_seconds)
     finally:
         shutil.rmtree(local_source.parent, ignore_errors=True)
     if completed.returncode != 0:

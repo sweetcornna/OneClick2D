@@ -24,6 +24,8 @@ MAX_LAYER_NAME_BYTES = 64
 MAX_CANVAS_OVERSCAN = 64
 MAX_TOTAL_LAYER_PIXELS = 64 * 1024 * 1024
 _LAYER_NAME_RE = re.compile(r"[a-z][a-z0-9]*(?:[ -][a-z0-9]+)*\Z")
+_PACKBITS_REPEAT_RE = re.compile(rb"(.)(?:\1)+", re.DOTALL)
+_PACKBITS_TRIPLE_RE = re.compile(rb"(.)\1\1", re.DOTALL)
 _DEFAULT_BLENDING_RANGES = b"\x00\x00\xff\xff" * 10
 
 
@@ -200,33 +202,40 @@ def _encode_packbits(data: bytes) -> bytes:
     if length == 1:
         return b"\0" + data
     index = 0
-    scan = 0
     while index < length:
-        if scan + 1 < length and data[scan] == data[scan + 1]:
-            while scan < length:
-                if scan - index >= 127 or scan + 1 >= length or data[scan] != data[scan + 1]:
-                    break
-                scan += 1
-            result.extend((256 - (scan - index), data[index]))
-            index = scan = scan + 1
-        else:
-            while scan < length:
-                if scan - index >= 127:
-                    break
-                if scan + 1 < length and data[scan] != data[scan + 1]:
-                    pass
-                elif (
-                    (scan + 2 == length or 127 - (scan - index) <= 2)
-                    and scan + 1 != length
-                    and data[scan] == data[scan + 1]
-                ):
-                    break
-                elif scan + 2 < length and data[scan] == data[scan + 1] == data[scan + 2]:
-                    break
-                scan += 1
-            result.append(scan - index - 1)
-            result.extend(data[index:scan])
-            index = scan
+        repeat = _PACKBITS_REPEAT_RE.match(data, index)
+        if repeat is not None:
+            run_length = repeat.end() - index
+            full_chunks, remainder = divmod(run_length, 128)
+            if full_chunks:
+                result.extend(bytes((129, data[index])) * full_chunks)
+            if remainder >= 2:
+                result.extend((257 - remainder, data[index]))
+                index = repeat.end()
+            elif remainder == 1:
+                index = repeat.end() - 1
+            else:
+                index = repeat.end()
+            continue
+
+        stop = min(index + 127, length)
+
+        # The old byte scanner stopped a literal before the first three-byte
+        # run, or before a two-byte run at the input/capacity boundary.
+        triple = _PACKBITS_TRIPLE_RE.search(data, index, min(length, stop + 2))
+        if triple is not None and triple.start() < stop:
+            stop = triple.start()
+        for pair_start in (index + 125, index + 126, length - 2):
+            if (
+                index <= pair_start < stop
+                and pair_start + 1 < length
+                and data[pair_start] == data[pair_start + 1]
+            ):
+                stop = pair_start
+
+        result.append(stop - index - 1)
+        result.extend(data[index:stop])
+        index = stop
     return bytes(result)
 
 

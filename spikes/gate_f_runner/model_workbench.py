@@ -33,6 +33,9 @@ from .model_worker import (
     LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256,
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
+    LEGACY_SOURCE_PRESERVE_V5_ENTRYPOINT_SHA256,
+    LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID,
+    LEGACY_SOURCE_PRESERVE_V5_PROFILE_SHA256,
     LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     LEGACY_UPSTREAM_COMMIT,
     MAX_MODEL_ARTIFACT_MANIFEST_DEPTH,
@@ -83,7 +86,8 @@ IMPORTED_MODEL_PHASES = tuple(phase for phase in MODEL_PHASES if phase != "RASTE
 MODEL_TIMEOUT_SECONDS = 3600
 MODEL_RESULT_NAME = "model-result.json"
 WORKBENCH_REPORT_NAME = "workbench-report.json"
-WORKBENCH_REPORT_FORMAT_VERSION = "0.5.0"
+WORKBENCH_REPORT_FORMAT_VERSION = "0.6.0"
+LEGACY_SOURCE_PRESERVE_V5_WORKBENCH_REPORT_FORMAT_VERSION = "0.5.0"
 LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION = "0.4.0"
 LEGACY_WORKBENCH_REPORT_FORMAT_VERSION = "0.3.0"
 ROOT = Path(__file__).resolve().parents[2]
@@ -914,6 +918,44 @@ def _load_normalization_evidence(run_dir: Path) -> tuple[dict[str, object], dict
     return normalized, report
 
 
+def _legacy_v5_entrypoint_attestation_dict(
+    value: object,
+    result: dict[str, object],
+    output_root: Path,
+) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise StageContractError("legacy v5 model entrypoint attestation is invalid")
+    summary_value = dict(value)
+    binding = summary_value.pop("binding", None)
+    attestation = _legacy_v4_entrypoint_attestation_dict(summary_value)
+    if (
+        not isinstance(binding, dict)
+        or set(binding) != {"source_sha256", "artifact_manifest_digest"}
+        or not isinstance(binding.get("source_sha256"), str)
+        or SHA256_RE.fullmatch(binding["source_sha256"]) is None
+        or not isinstance(binding.get("artifact_manifest_digest"), str)
+        or SHA256_RE.fullmatch(binding["artifact_manifest_digest"]) is None
+        or binding["source_sha256"] != result.get("source_sha256")
+    ):
+        raise StageContractError("legacy v5 model entrypoint attestation binding is invalid")
+    published_manifest = _artifact_manifest(
+        output_root / "input",
+        output_root / "input" / ".entrypoint-attestation.json",
+    )
+    if (
+        _artifact_manifest_digest(published_manifest)
+        != binding["artifact_manifest_digest"]
+    ):
+        raise StageContractError(
+            "legacy v5 model entrypoint attestation artifact manifest binding does not match"
+        )
+    attestation["binding"] = {
+        "source_sha256": binding["source_sha256"],
+        "artifact_manifest_digest": binding["artifact_manifest_digest"],
+    }
+    return attestation
+
+
 def _identity(
     result: dict[str, object],
     output_root: Path,
@@ -978,30 +1020,50 @@ def _identity(
             MODEL_LEGACY_ALPHA_THRESHOLD_SOURCE,
         )
 
-    if result.get("profile_id") == LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID:
-        legacy_profile_path = PROFILE_ROOT / "see-through-v3-nf4.source-preserve-v4.json"
+    legacy_source_preserve_id = result.get("profile_id")
+    if legacy_source_preserve_id in {
+        LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+        LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID,
+    }:
+        if legacy_source_preserve_id == LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID:
+            legacy_version = "v4"
+            legacy_profile_name = "see-through-v3-nf4.source-preserve-v4.json"
+            legacy_profile_sha256 = LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
+            legacy_entrypoint_sha256 = LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256
+        else:
+            legacy_version = "v5"
+            legacy_profile_name = "see-through-v3-nf4.source-preserve-v5.json"
+            legacy_profile_sha256 = LEGACY_SOURCE_PRESERVE_V5_PROFILE_SHA256
+            legacy_entrypoint_sha256 = LEGACY_SOURCE_PRESERVE_V5_ENTRYPOINT_SHA256
+        legacy_profile_path = PROFILE_ROOT / legacy_profile_name
         legacy_profile_exact = read_bounded_file(legacy_profile_path, 256 * 1024)
         legacy_profile = strict_load_json_bytes(legacy_profile_exact)
         if (
             not isinstance(legacy_profile, dict)
-            or legacy_profile.get("profile_id") != LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
-            or sha256_bytes(legacy_profile_exact) != LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
-            or result.get("profile_sha256") != LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
+            or legacy_profile.get("profile_id") != legacy_source_preserve_id
+            or sha256_bytes(legacy_profile_exact) != legacy_profile_sha256
+            or result.get("profile_sha256") != legacy_profile_sha256
             or result.get("dependencies_sha256") != LEGACY_DEPENDENCIES_SHA256
         ):
-            raise StageContractError("legacy v4 source-preserve model workbench profile identity does not match")
+            raise StageContractError(
+                f"legacy {legacy_version} source-preserve model workbench profile identity does not match"
+            )
         code = legacy_profile.get("code")
         entrypoint = legacy_profile.get("entrypoint")
         runtime = legacy_profile.get("runtime")
         if not isinstance(code, dict) or not isinstance(entrypoint, dict) or not isinstance(runtime, dict):
-            raise StageContractError("legacy v4 source-preserve model workbench profile is invalid")
+            raise StageContractError(
+                f"legacy {legacy_version} source-preserve model workbench profile is invalid"
+            )
         legacy_entrypoint = _validated_archived_entrypoint(legacy_profile)
         if (
-            sha256_file(legacy_entrypoint) != LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256
-            or entrypoint.get("sha256") != LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256
+            sha256_file(legacy_entrypoint) != legacy_entrypoint_sha256
+            or entrypoint.get("sha256") != legacy_entrypoint_sha256
             or runtime.get("dependencies_sha256") != LEGACY_DEPENDENCIES_SHA256
         ):
-            raise StageContractError("legacy v4 source-preserve model workbench entrypoint identity does not match")
+            raise StageContractError(
+                f"legacy {legacy_version} source-preserve model workbench entrypoint identity does not match"
+            )
         inference = legacy_profile.get("inference")
         postprocess = legacy_profile.get("postprocess")
         if (
@@ -1044,15 +1106,24 @@ def _identity(
             or not isinstance(postprocess.get("neutral_reconstruction"), str)
             or not postprocess["neutral_reconstruction"]
         ):
-            raise StageContractError("legacy v4 source-preserve model workbench profile is invalid")
+            raise StageContractError(
+                f"legacy {legacy_version} source-preserve model workbench profile is invalid"
+            )
         if "entrypoint_attestation" not in result:
             attestation = None
             attestation_reasons = ("MODEL_ENTRYPOINT_ATTESTATION_MISSING",)
         else:
             try:
-                attestation = _legacy_v4_entrypoint_attestation_dict(
-                    result["entrypoint_attestation"]
-                )
+                if legacy_source_preserve_id == LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID:
+                    attestation = _legacy_v5_entrypoint_attestation_dict(
+                        result["entrypoint_attestation"],
+                        result,
+                        output_root,
+                    )
+                else:
+                    attestation = _legacy_v4_entrypoint_attestation_dict(
+                        result["entrypoint_attestation"]
+                    )
             except StageContractError:
                 attestation = None
                 attestation_reasons = ("MODEL_ENTRYPOINT_ATTESTATION_MISMATCH",)
@@ -1060,11 +1131,11 @@ def _identity(
                 attestation_reasons = ()
         return (
             {
-                "profile_id": LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
-                "profile_sha256": LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
+                "profile_id": legacy_source_preserve_id,
+                "profile_sha256": legacy_profile_sha256,
                 "dependencies_sha256": LEGACY_DEPENDENCIES_SHA256,
                 "upstream_commit": code.get("commit"),
-                "entrypoint_sha256": LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256,
+                "entrypoint_sha256": legacy_entrypoint_sha256,
                 "quantization": inference["quantization"],
                 "seed": inference["seed"],
                 "resolution": inference["resolution"],
@@ -1072,7 +1143,11 @@ def _identity(
                 "inference_steps": inference["inference_steps"],
                 "cpu_offload": inference["cpu_offload"],
                 "group_offload": inference["group_offload"],
-                "postprocess_algorithm": postprocess["algorithm_id"],
+                "postprocess_algorithm": (
+                    LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID
+                    if legacy_source_preserve_id == LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID
+                    else postprocess["algorithm_id"]
+                ),
                 "entrypoint_attestation": attestation,
                 "license_status": "supporting_weight_metadata_incomplete_no_redistribution",
             },
@@ -1190,7 +1265,11 @@ def build_model_workbench_report(
         raise StageContractError("model workbench result is invalid")
     if (
         result.get("profile_id")
-        not in {PROFILE_ID, LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID}
+        not in {
+            PROFILE_ID,
+            LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+            LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID,
+        }
         and "entrypoint_attestation" in result
     ):
         raise StageContractError("non-active model workbench result has unexpected attestation")
@@ -1526,6 +1605,24 @@ def _project_legacy_v4_model_workbench_report(
     return projected
 
 
+def _project_legacy_v5_model_workbench_report(
+    report: dict[str, object],
+) -> dict[str, object]:
+    model = report.get("model")
+    if not isinstance(model, dict):
+        raise StageContractError("model workbench report projection is invalid")
+    identity = model.get("identity")
+    if (
+        not isinstance(identity, dict)
+        or identity.get("profile_id") != LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID
+    ):
+        raise StageContractError("model workbench report projection is invalid")
+    return {
+        **report,
+        "format_version": LEGACY_SOURCE_PRESERVE_V5_WORKBENCH_REPORT_FORMAT_VERSION,
+    }
+
+
 def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
     try:
         run_dir = contained_run_path(run_dir.parent, run_dir.name, kind="directory")
@@ -1563,6 +1660,7 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
         if persisted_version not in {
             LEGACY_WORKBENCH_REPORT_FORMAT_VERSION,
             LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION,
+            LEGACY_SOURCE_PRESERVE_V5_WORKBENCH_REPORT_FORMAT_VERSION,
             WORKBENCH_REPORT_FORMAT_VERSION,
         }:
             raise StageContractError("persisted model workbench report format version is unsupported")
@@ -1574,6 +1672,9 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
             },
             LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION: {
                 LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
+            },
+            LEGACY_SOURCE_PRESERVE_V5_WORKBENCH_REPORT_FORMAT_VERSION: {
+                LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID,
             },
             WORKBENCH_REPORT_FORMAT_VERSION: {PROFILE_ID},
         }
@@ -1604,6 +1705,8 @@ def load_model_workbench_report(run_dir: Path) -> dict[str, object]:
             expected_persisted = _project_legacy_model_workbench_report(report)
         elif persisted_version == LEGACY_SOURCE_PRESERVE_V4_WORKBENCH_REPORT_FORMAT_VERSION:
             expected_persisted = _project_legacy_v4_model_workbench_report(report)
+        elif persisted_version == LEGACY_SOURCE_PRESERVE_V5_WORKBENCH_REPORT_FORMAT_VERSION:
+            expected_persisted = _project_legacy_v5_model_workbench_report(report)
         else:
             expected_persisted = report
         if persisted != expected_persisted:

@@ -42,6 +42,19 @@ from spikes.gate_f_runner.raster import _load_pillow
 from tests.test_gate_f_model_workbench import refresh_model_inventory, write_model_fixture
 
 
+ROOT = Path(__file__).resolve().parents[1]
+REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-motion-draft" / "v0.3" / "report.schema.json"
+
+
+def assert_model_motion_report_schema(value: object) -> None:
+    from tests.test_gate_f_model_candidate import _validate_json_schema
+
+    schema = json.loads(REPORT_SCHEMA.read_text(encoding="utf-8"))
+    if not isinstance(schema, dict):
+        raise AssertionError("motion report schema is invalid")
+    _validate_json_schema(value, schema, schema)
+
+
 def _sparse_model_source(image_root: Path | None = None) -> Any:
     from PIL import Image, ImageDraw
 
@@ -80,7 +93,7 @@ def persist_trusted_model_source(run_dir: Path, normalized_source: Any) -> bytes
     return trusted_data
 
 
-def write_sparse_motion_fixture(run_dir: Path) -> None:
+def write_sparse_motion_fixture(run_dir: Path) -> dict[str, object]:
     with _sparse_model_source() as normalized_source:
         persist_trusted_model_source(run_dir, normalized_source)
 
@@ -91,6 +104,7 @@ def write_sparse_motion_fixture(run_dir: Path) -> None:
         reconstruction.save(image_root / "src_img.png", format="PNG")
         reconstruction.save(image_root / "src_head.png", format="PNG")
     refresh_model_inventory(run_dir, result, publish_result=True)
+    return result
 
 
 def motion_loader_arguments(run_dir: Path) -> dict[str, str]:
@@ -258,9 +272,15 @@ class GateFModelMotionDraftTests(unittest.TestCase):
                 next(item for item in report["layers"] if item["semantic"] == "mouth")["box_ltrb"],
             )
             self.assertIn("premultiplied", report["profile"]["renderer_profile_id"])
+            self.assertEqual(
+                ["semantic_correctness", "hidden_region_completion", "dynamic_visual_quality"],
+                report["quality"]["review_items"],
+            )
+            self.assertFalse(any("FIDELITY_GATE_NOT_PASSED" in item for item in report["quality"]["review_items"]))
             self.assertTrue(report["claims"]["dynamic_preview_research_draft"])
             self.assertFalse(report["claims"]["oc2d_produced"])
             self.assertFalse(report["claims"]["moc3_produced"])
+            assert_model_motion_report_schema(report)
 
             workbench = load_model_workbench_report(run_dir)
             self.assertEqual(report, workbench["motion_draft"])
@@ -362,25 +382,54 @@ class GateFModelMotionDraftTests(unittest.TestCase):
                 for part in parts:
                     part.image.close()
 
-    def test_motion_rejects_model_with_source_visible_omissions(self) -> None:
+    def test_motion_records_fidelity_warning_for_source_visible_omissions(self) -> None:
         from PIL import Image
 
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory) / "run.motion-coverage"
             run_dir.mkdir()
-            result = write_model_fixture(run_dir, publish_result=False)
+            result = write_sparse_motion_fixture(run_dir)
             reconstruction_path = run_dir / "model-output" / "input" / "input" / "reconstruction.png"
-            with Image.new("RGBA", (CANVAS_SIZE, CANVAS_SIZE), (0, 0, 0, 0)) as reconstruction:
-                reconstruction.putpixel((0, 0), (30, 90, 160, 220))
+            with Image.open(reconstruction_path, formats=("PNG",)) as stored:
+                stored.load()
+                reconstruction = stored.convert("RGBA")
+            try:
+                reconstruction.putpixel((90, 90), (0, 0, 0, 0))
                 reconstruction.save(reconstruction_path, format="PNG")
+            finally:
+                reconstruction.close()
             refresh_model_inventory(run_dir, result, publish_result=True)
 
             fidelity = load_model_workbench_report(run_dir)["quality"]["neutral_fidelity"]
             self.assertEqual("review_required", fidelity["status"])
-            self.assertGreater(fidelity["source_visible_omission_count"], 1_000_000)
-            with self.assertRaisesRegex(StageContractError, "fidelity-passing active model profile"):
-                generate_model_motion_draft(run_dir)
-            self.assertFalse((run_dir / "motion-draft").exists())
+            self.assertEqual(1, fidelity["source_visible_omission_count"])
+            report_path, report = generate_model_motion_draft(run_dir)
+
+            self.assertTrue(report_path.is_file())
+            self.assertEqual("review_required", report["quality"]["status"])
+            warnings = [
+                item
+                for item in report["quality"]["review_items"]
+                if item.startswith("FIDELITY_GATE_NOT_PASSED:")
+            ]
+            self.assertEqual(1, len(warnings))
+            thresholds = fidelity["pass_thresholds"]
+            self.assertIn(
+                f"coverage actual={float(fidelity['source_visible_coverage_ratio'])} "
+                f"required=={float(thresholds['source_visible_coverage_ratio_minimum'])}",
+                warnings[0],
+            )
+            self.assertIn(
+                f"exact_ratio actual={float(fidelity['source_rgb_exact_ratio'])} "
+                f"required>={float(thresholds['source_rgb_exact_ratio_minimum'])}",
+                warnings[0],
+            )
+            self.assertIn(
+                f"rgb_mae actual={float(fidelity['source_rgb_mae'])} "
+                f"required<={float(thresholds['source_rgb_mae_maximum'])}",
+                warnings[0],
+            )
+            assert_model_motion_report_schema(report)
 
     def test_loader_recomputes_evidence_and_rejects_frame_or_report_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -439,7 +488,7 @@ class GateFModelMotionDraftTests(unittest.TestCase):
             with self.assertRaisesRegex(StageContractError, "run directory"):
                 generate_model_motion_draft(linked)
 
-    def test_rejects_legacy_model_profile(self) -> None:
+    def test_profile_id_mismatch_remains_a_hard_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory) / "run.motion-legacy"
             run_dir.mkdir()

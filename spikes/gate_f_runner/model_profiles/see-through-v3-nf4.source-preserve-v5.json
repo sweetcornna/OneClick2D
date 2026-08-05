@@ -1,24 +1,22 @@
 {
   "format": "oneclick2d.model-spike-profile",
   "format_version": "0.1.0",
-  "profile_id": "see-through.v3.nf4.1280.source-preserve.v6",
+  "profile_id": "see-through.v3.nf4.1280.wsl2.source-preserve.v5",
   "code": {
     "repository": "https://github.com/shitagaki-lab/see-through.git",
     "commit": "58a1cb11d13f85acec9bbddb8cd4b6487843d4cf",
     "license": "Apache-2.0"
   },
   "runtime": {
-    "kind": "native-linux",
-    "isolation": "none-host-local",
-    "isolation_notice": "无隔离边界、仅限本机",
+    "kind": "wsl2",
+    "distribution": "Ubuntu",
     "code_root_relative_to_home": "oneclick2d-model-spikes/see-through",
     "python_relative_to_code_root": ".venv/bin/python",
-    "python_path_entries": ["common"],
     "python_version": "3.12.13",
     "torch_version": "2.8.0+cu128",
     "cuda_version": "12.8",
-    "dependencies_profile": "requirements-see-through-v3-nf4.txt",
-    "dependencies_sha256": "b14584b16d08ac6398d6129a36cb4c0337737f14df7b1a982c611a6c449d5bf8",
+    "dependencies_profile": "requirements-see-through-v3-nf4-wsl2.txt",
+    "dependencies_sha256": "dac624bb1f3644734fce4f67a14b54bf54241a8719aa2ff829bc3e77961fe1d5",
     "timm_commit": "6e3fdda39508db30766f9d9e6ec32380ebee8b8c",
     "versions": {
       "accelerate": "1.13.0",
@@ -32,7 +30,6 @@
       "opencv-python": "4.13.0.92",
       "pillow": "12.1.1",
       "psd-tools": "1.14.2",
-      "pycocotools": "2.0.11",
       "pyyaml": "6.0.3",
       "safetensors": "0.7.0",
       "scikit-image": "0.25.2",
@@ -46,13 +43,12 @@
     }
   },
   "entrypoint": {
-    "path": "see_through_v3_nf4_source_preserve_v6.py",
-    "sha256": "3cbc61281babd8eff1074092129746a78cb05ce58edd4f96650e039b33acdbc9",
+    "path": "see_through_v3_nf4_source_preserve_v5.py",
+    "sha256": "8732db76c4fcf3f4bf7e94f3a206456ffbf9bd78ef773aa66d9b793c6f8f1ac5",
     "upstream_script": "inference/scripts/inference_psd_quantized.py",
     "device_policy": {
-      "path": "nf4_marigold_device_policy_v6.py",
-      "sha256": "6ef3f26ade2975c68a6838ba8ee3b6504bc7927b726d8bd62f23f7f11327ad29",
-      "policy_id": "see-through.v6.nf4-marigold-bounded-offload.v2"
+      "path": "nf4_marigold_device_policy.py",
+      "sha256": "569e0ced8bcc4b144bfc787e0e37f2d90fc263081ceac3c063eabf26ce1c14df"
     }
   },
   "models": [
@@ -61,16 +57,6 @@
       "repository": "frankjoshua/juggernautXL_version6Rundiffusion",
       "revision": "aadab4c7cb252b83a0e2d6f3386b8c837af23932",
       "local_dir_relative_to_code_root": "models/juggernautXL_version6Rundiffusion",
-      "runtime_resolution": {
-        "kind": "huggingface-hub-cache",
-        "repo_id": "frankjoshua/juggernautXL_version6Rundiffusion",
-        "revision": "main",
-        "subfolder": "scheduler",
-        "hf_home_relative_to_code_root": "models/hf-cache",
-        "cache_repository": "models--frankjoshua--juggernautXL_version6Rundiffusion",
-        "required_ref": "refs/main",
-        "resolved_commit": "aadab4c7cb252b83a0e2d6f3386b8c837af23932"
-      },
       "license_status": "configuration-only-no-weights",
       "config_files": [
         {"path": "scheduler/scheduler_config.json", "git_blob_sha1": "f967e9ad6d6a6d1a78f47ca809d3e170a43e3053"}

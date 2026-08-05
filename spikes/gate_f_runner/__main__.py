@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -12,6 +13,7 @@ from .contracts import SpecValidationError, StageContractError, StageStatus
 from .runner import PipelineRunner
 from .runtime import (
     ID_RE,
+    contained_run_path,
     create_regular_run_file,
     read_bounded_file,
     require_regular_workspace_root,
@@ -134,7 +136,7 @@ def _model(args: argparse.Namespace) -> int:
         print("model spike rejected: invalid or existing run", file=sys.stderr)
         return 64
     except (OSError, ValueError):
-        print("model spike failed: isolated model worker error", file=sys.stderr)
+        print("model spike failed: local model worker error", file=sys.stderr)
         return 70
     try:
         _, _, result = run_normalized_model_workbench(
@@ -147,7 +149,7 @@ def _model(args: argparse.Namespace) -> int:
         )
     except (OSError, ValueError, TypeError, SpecValidationError, StageContractError):
         shutil.rmtree(run_dir, ignore_errors=True)
-        print("model spike failed: isolated model worker error", file=sys.stderr)
+        print("model spike failed: local model worker error", file=sys.stderr)
         return 70
     print(
         f"run_id={args.run_id} status=LOCAL_MODEL_SPIKE_COMPLETED "
@@ -171,6 +173,22 @@ def _motion(args: argparse.Namespace) -> int:
         f"run_id={args.run_id} status=LOCAL_MODEL_MOTION_DRAFT_COMPLETED "
         f"frames={len(report['frames'])} gate_f=GATE_F_NOT_EVALUATED"
     )
+    return 0
+
+
+def _diagnose_fidelity(args: argparse.Namespace) -> int:
+    from .model_fidelity_diagnosis import diagnose_model_fidelity
+
+    if not ID_RE.fullmatch(args.run_id):
+        print("fidelity diagnosis rejected: invalid run id", file=sys.stderr)
+        return 64
+    try:
+        run_dir = contained_run_path(args.workspace_root, args.run_id, kind="directory")
+        report = diagnose_model_fidelity(run_dir)
+    except (OSError, ValueError, TypeError, StageContractError):
+        print("fidelity diagnosis failed: local diagnosis error", file=sys.stderr)
+        return 70
+    print(json.dumps(report, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
     return 0
 
 
@@ -278,7 +296,10 @@ def build_parser() -> argparse.ArgumentParser:
     gui.add_argument("--no-open", action="store_true")
     gui.set_defaults(func=_gui)
 
-    model = subparsers.add_parser("model", help="run the pinned See-through model spike in isolated WSL2")
+    model = subparsers.add_parser(
+        "model",
+        help="run the pinned host-neutral v6 model spike with the native Linux worker (no isolation; host-local only)",
+    )
     model.add_argument("--source", type=Path, required=True)
     model.add_argument("--run-id", required=True)
     model.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
@@ -289,6 +310,14 @@ def build_parser() -> argparse.ArgumentParser:
     motion.add_argument("--run-id", required=True)
     motion.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
     motion.set_defaults(func=_motion)
+
+    diagnose_fidelity = subparsers.add_parser(
+        "diagnose-fidelity",
+        help="diagnose H1/H2 neutral-fidelity omissions without changing a completed model run",
+    )
+    diagnose_fidelity.add_argument("--run-id", required=True)
+    diagnose_fidelity.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
+    diagnose_fidelity.set_defaults(func=_diagnose_fidelity)
 
     model_candidate = subparsers.add_parser(
         "model-candidate",

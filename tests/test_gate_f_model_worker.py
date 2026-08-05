@@ -23,6 +23,10 @@ from spikes.gate_f_runner.contracts import StageContractError
 from spikes.gate_f_runner.model_worker import (
     DEVICE_POLICY_PATH,
     ENTRYPOINT_ROOT,
+    LEGACY_SOURCE_PRESERVE_V5_ENTRYPOINT_SHA256,
+    LEGACY_SOURCE_PRESERVE_V5_NF4_MARIGOLD_DEVICE_POLICY_ID,
+    LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID,
+    LEGACY_SOURCE_PRESERVE_V5_PROFILE_SHA256,
     LEGACY_SOURCE_PRESERVE_V4_ENTRYPOINT_SHA256,
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
@@ -45,14 +49,20 @@ from spikes.gate_f_runner.model_worker import (
     _consume_entrypoint_attestation,
     _artifact_manifest_digest,
     _inventory,
+    _invoke_model,
+    _invoke_native,
     _invoke_wsl,
     _legacy_v4_entrypoint_attestation_dict,
     _load_profile,
+    _native_path,
     _run_checked,
+    _runtime,
     _validated_archived_entrypoint,
     _validated_entrypoint,
     _validated_postprocess,
     _verify_runtime,
+    _verify_native_models,
+    _verify_native_scheduler_cache,
     _verify_wsl_models,
     _wsl_path,
     run_model_worker,
@@ -65,6 +75,7 @@ PINNED_MODEL_ROOT = Path.home() / "oneclick2d-model-spikes" / "see-through"
 PINNED_MODEL_PYTHON = PINNED_MODEL_ROOT / ".venv" / "bin" / "python"
 V4_ENTRYPOINT = ENTRYPOINT_ROOT / "see_through_v3_nf4_source_preserve_v4.py"
 V5_ENTRYPOINT = ENTRYPOINT_ROOT / "see_through_v3_nf4_source_preserve_v5.py"
+V6_ENTRYPOINT = ENTRYPOINT_ROOT / "see_through_v3_nf4_source_preserve_v6.py"
 V4_PROFILE = (
     Path(__file__).parents[1]
     / "spikes"
@@ -72,8 +83,29 @@ V4_PROFILE = (
     / "model_profiles"
     / "see-through-v3-nf4.source-preserve-v4.json"
 )
+V5_PROFILE = (
+    Path(__file__).parents[1]
+    / "spikes"
+    / "gate_f_runner"
+    / "model_profiles"
+    / "see-through-v3-nf4.source-preserve-v5.json"
+)
 ATTESTATION_CHALLENGE = "ab" * 32
 ATTESTATION_PSD_BYTES = b"attested-psd"
+
+
+def _wsl_profile() -> dict[str, object]:
+    profile, _ = _load_profile()
+    runtime = dict(profile["runtime"])
+    runtime.pop("isolation_notice")
+    runtime.update(
+        {
+            "kind": "wsl2",
+            "isolation": "wsl2-vm",
+            "distribution": "Ubuntu",
+        }
+    )
+    return {**profile, "runtime": runtime}
 
 
 def _v5_entrypoint_control_namespace() -> dict[str, object]:
@@ -128,6 +160,11 @@ def _minimal_psd() -> bytes:
 
 def _u32(value: int) -> bytes:
     return struct.pack(">I", value)
+
+
+def _git_blob_sha1(exact: bytes) -> str:
+    header = f"blob {len(exact)}\0".encode("ascii")
+    return hashlib.sha1(header + exact, usedforsecurity=False).hexdigest()
 
 
 def _packbits(data: bytes) -> bytes:
@@ -281,7 +318,7 @@ def _valid_entrypoint_attestation(
         "components": {
             "vae": {
                 "storage_devices": ["meta"],
-                "execution_hook_devices": ["cuda:0"],
+                "execution_hook_devices": [None, "cuda:0"],
                 "upstream_cuda_move_suppressed": True,
                 "disposition": "sequential-cpu-offload",
             },
@@ -627,6 +664,12 @@ class GateFModelWorkerTests(unittest.TestCase):
     def test_profiles_have_pinned_safe_weight_artifacts(self) -> None:
         profile, exact = _load_profile()
         self.assertEqual(PROFILE_ID, profile["profile_id"])
+        self.assertEqual("native-linux", profile["runtime"]["kind"])
+        self.assertEqual("none-host-local", profile["runtime"]["isolation"])
+        self.assertEqual("无隔离边界、仅限本机", profile["runtime"]["isolation_notice"])
+        self.assertNotIn("distribution", profile["runtime"])
+        self.assertEqual(["common"], profile["runtime"]["python_path_entries"])
+        self.assertEqual("2.0.11", profile["runtime"]["versions"]["pycocotools"])
         self.assertEqual(profile, json.loads(exact))
         self.assertRegex(profile["code"]["commit"], r"^[0-9a-f]{40}$")
         self.assertEqual(3, len(profile["models"]))
@@ -654,6 +697,21 @@ class GateFModelWorkerTests(unittest.TestCase):
         self.assertEqual(
             profile["runtime"]["dependencies_sha256"],
             hashlib.sha256(dependencies_path.read_bytes()).hexdigest(),
+        )
+        self.assertIn(b"pycocotools==2.0.11", dependencies_path.read_bytes().splitlines())
+        scheduler = next(model for model in profile["models"] if model["role"] == "scheduler_configuration")
+        self.assertEqual(
+            {
+                "kind": "huggingface-hub-cache",
+                "repo_id": "frankjoshua/juggernautXL_version6Rundiffusion",
+                "revision": "main",
+                "subfolder": "scheduler",
+                "hf_home_relative_to_code_root": "models/hf-cache",
+                "cache_repository": "models--frankjoshua--juggernautXL_version6Rundiffusion",
+                "required_ref": "refs/main",
+                "resolved_commit": "aadab4c7cb252b83a0e2d6f3386b8c837af23932",
+            },
+            scheduler["runtime_resolution"],
         )
         entrypoint_path = ENTRYPOINT_ROOT / profile["entrypoint"]["path"]
         self.assertEqual(entrypoint_path, _validated_entrypoint(profile))
@@ -691,10 +749,32 @@ class GateFModelWorkerTests(unittest.TestCase):
             profile["entrypoint"]["sha256"],
         )
 
+    def test_v5_archive_and_entrypoint_have_verifiable_preimages(self) -> None:
+        archived = V5_PROFILE.read_bytes()
+        profile = json.loads(archived)
+        self.assertEqual(LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID, profile["profile_id"])
+        self.assertEqual(
+            LEGACY_SOURCE_PRESERVE_V5_PROFILE_SHA256,
+            hashlib.sha256(archived).hexdigest(),
+        )
+        self.assertEqual(
+            LEGACY_SOURCE_PRESERVE_V5_ENTRYPOINT_SHA256,
+            hashlib.sha256(V5_ENTRYPOINT.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            LEGACY_SOURCE_PRESERVE_V5_ENTRYPOINT_SHA256,
+            profile["entrypoint"]["sha256"],
+        )
+        self.assertEqual(
+            LEGACY_SOURCE_PRESERVE_V5_NF4_MARIGOLD_DEVICE_POLICY_ID,
+            LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID,
+        )
+
     def test_profile_attests_device_policy_digest(self) -> None:
         profile, _ = _load_profile()
         device_policy = profile["entrypoint"]["device_policy"]
         self.assertEqual(DEVICE_POLICY_PATH.name, device_policy["path"])
+        self.assertEqual(NF4_MARIGOLD_DEVICE_POLICY_ID, device_policy["policy_id"])
         self.assertEqual(device_policy["sha256"], hashlib.sha256(DEVICE_POLICY_PATH.read_bytes()).hexdigest())
         self.assertEqual(ENTRYPOINT_ROOT / profile["entrypoint"]["path"], _validated_entrypoint(profile))
 
@@ -995,6 +1075,8 @@ class GateFModelWorkerTests(unittest.TestCase):
         profile = json.loads(V4_PROFILE.read_bytes())
         summary = _valid_entrypoint_attestation_summary()
         summary.pop("binding")
+        summary["policy_id"] = LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID
+        summary["components"]["vae"]["execution_hook_devices"] = ["cuda:0"]
         with mock.patch.multiple(
             "spikes.gate_f_runner.model_worker",
             DEVICE_POLICY_PATH=ENTRYPOINT_ROOT / "renamed-active-policy.py",
@@ -1042,6 +1124,7 @@ class GateFModelWorkerTests(unittest.TestCase):
             "cuda": runtime["cuda_version"],
             "cuda_available": True,
             "packages": runtime["versions"],
+            "python_path_entries_effective": True,
             "timm_direct_url": {
                 "url": "https://github.com/huggingface/pytorch-image-models",
                 "vcs_info": {
@@ -1055,8 +1138,21 @@ class GateFModelWorkerTests(unittest.TestCase):
             stdout=json.dumps(actual, separators=(",", ":")).encode("utf-8"),
             stderr=b"",
         )
-        with mock.patch("spikes.gate_f_runner.model_worker._run_checked", return_value=completed):
+        with mock.patch.dict(os.environ, {"WSLENV": "SHOULD_NOT_PASS", "PYTHONPATH": "untrusted"}), mock.patch(
+            "spikes.gate_f_runner.model_worker._run_checked",
+            return_value=completed,
+        ) as run:
             _verify_runtime(profile, runtime["dependencies_sha256"])
+        command = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
+        self.assertNotIn("wsl.exe", command)
+        self.assertEqual(PINNED_MODEL_ROOT, kwargs["cwd"])
+        self.assertNotIn("WSLENV", kwargs["env"])
+        self.assertNotIn("PYTHONPATH", kwargs["env"])
+        self.assertEqual(
+            json.dumps([str(PINNED_MODEL_ROOT / "common")], separators=(",", ":")),
+            kwargs["env"]["ONECLICK2D_PYTHON_PATH_ENTRIES"],
+        )
         actual["cuda_available"] = False
         completed.stdout = json.dumps(actual, separators=(",", ":")).encode("utf-8")
         with mock.patch("spikes.gate_f_runner.model_worker._run_checked", return_value=completed):
@@ -1067,6 +1163,26 @@ class GateFModelWorkerTests(unittest.TestCase):
         profile, _ = _load_profile()
         with self.assertRaisesRegex(StageContractError, "dependency profile mismatch"):
             _verify_runtime(profile, "0" * 64)
+
+    def test_runtime_profile_rejects_missing_and_extra_kind_specific_fields(self) -> None:
+        profile, _ = _load_profile()
+        for changed_runtime in (
+            {key: value for key, value in profile["runtime"].items() if key != "isolation"},
+            {**profile["runtime"], "distribution": "Ubuntu"},
+            {**profile["runtime"], "isolation": "wsl2-vm"},
+        ):
+            with self.subTest(keys=set(changed_runtime), isolation=changed_runtime.get("isolation")):
+                with self.assertRaisesRegex(StageContractError, "runtime identity"):
+                    _runtime({**profile, "runtime": changed_runtime})
+
+        wsl_profile = _wsl_profile()
+        self.assertEqual("wsl2", _runtime(wsl_profile)["kind"])
+        for key in ("kind", "isolation", "distribution"):
+            changed_runtime = dict(wsl_profile["runtime"])
+            changed_runtime.pop(key)
+            with self.subTest(wsl_missing=key):
+                with self.assertRaisesRegex(StageContractError, "runtime"):
+                    _runtime({**wsl_profile, "runtime": changed_runtime})
 
     def test_entrypoint_attestation_records_effective_offload_devices(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1127,6 +1243,8 @@ class GateFModelWorkerTests(unittest.TestCase):
 
     def test_entrypoint_attestation_rejects_component_devices_not_equal_to_execution_device(self) -> None:
         cases = (
+            ("vae", "execution_hook_devices", [None]),
+            ("vae", "execution_hook_devices", [None, "cpu"]),
             ("vae", "execution_hook_devices", ["cuda"]),
             ("vae", "execution_hook_devices", ["cuda:1"]),
             ("vae", "execution_hook_devices", ["cuda:0", "cuda:1"]),
@@ -1306,7 +1424,7 @@ class GateFModelWorkerTests(unittest.TestCase):
         self.assertEqual([], attestation["components"]["text_encoder"]["storage_devices"])
 
     def test_wsl_model_verification_rejects_tracked_checkout_changes(self) -> None:
-        profile, _ = _load_profile()
+        profile = _wsl_profile()
         completed = [
             mock.Mock(returncode=0, stdout=(profile["code"]["commit"] + "\n").encode("ascii"), stderr=b""),
             mock.Mock(returncode=0, stdout=b" M inference/scripts/inference_psd_quantized.py\n", stderr=b""),
@@ -1316,7 +1434,7 @@ class GateFModelWorkerTests(unittest.TestCase):
                 _verify_wsl_models(profile)
 
     def test_wsl_model_verification_binds_executed_upstream_entrypoint_to_commit(self) -> None:
-        profile, _ = _load_profile()
+        profile = _wsl_profile()
         completed = [
             mock.Mock(returncode=0, stdout=(profile["code"]["commit"] + "\n").encode("ascii"), stderr=b""),
             mock.Mock(returncode=0, stdout=b"", stderr=b""),
@@ -1327,6 +1445,75 @@ class GateFModelWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(StageContractError, "does not match the pinned commit"):
                 _verify_wsl_models(profile)
 
+    def test_wsl_model_verification_preserves_commands_and_checks_scheduler_cache(self) -> None:
+        profile = _wsl_profile()
+        runtime = profile["runtime"]
+        prefix = [
+            "wsl.exe",
+            "-d",
+            runtime["distribution"],
+            "--cd",
+            f"~/{runtime['code_root_relative_to_home']}",
+            "--",
+        ]
+        config_digests: dict[str, str] = {}
+        weight_digests: dict[str, str] = {}
+        weight_lengths: dict[str, int] = {}
+        for model in profile["models"]:
+            local_dir = model["local_dir_relative_to_code_root"]
+            for descriptor in model["config_files"]:
+                config_digests[f"{local_dir}/{descriptor['path']}"] = descriptor["git_blob_sha1"]
+            for descriptor in model["weights"]:
+                path = f"{local_dir}/{descriptor['path']}"
+                weight_digests[path] = descriptor["sha256"]
+                weight_lengths[path] = descriptor["byte_length"]
+        calls: list[list[str]] = []
+
+        def completed(command, **kwargs):
+            del kwargs
+            calls.append(command)
+            self.assertEqual(prefix, command[: len(prefix)])
+            tail = command[len(prefix) :]
+            if tail == ["git", "rev-parse", "HEAD"]:
+                stdout = (profile["code"]["commit"] + "\n").encode("ascii")
+            elif tail == ["git", "status", "--porcelain=v1", "--untracked-files=no"]:
+                stdout = b""
+            elif tail[:2] == ["git", "rev-parse"]:
+                stdout = ("a" * 40 + "\n").encode("ascii")
+            elif tail[:2] == ["git", "hash-object"]:
+                path = tail[-1]
+                if path == profile["entrypoint"]["upstream_script"]:
+                    digest = "a" * 40
+                elif path in config_digests:
+                    digest = config_digests[path]
+                elif "/snapshots/" in path:
+                    digest = profile["models"][0]["config_files"][0]["git_blob_sha1"]
+                else:
+                    self.fail(f"unexpected WSL hash path: {path!r}")
+                stdout = (digest + "\n").encode("ascii")
+            elif tail[0] == "sha256sum":
+                stdout = (weight_digests[tail[1]] + "  " + tail[1] + "\n").encode("ascii")
+            elif tail[:3] == ["stat", "-c", "%s"]:
+                stdout = (str(weight_lengths[tail[3]]) + "\n").encode("ascii")
+            elif tail[0] == "cat":
+                stdout = (profile["models"][0]["revision"] + "\n").encode("ascii")
+            else:
+                self.fail(f"unexpected WSL verification command: {tail!r}")
+            return mock.Mock(returncode=0, stdout=stdout, stderr=b"")
+
+        with mock.patch("spikes.gate_f_runner.model_worker._run_checked", side_effect=completed):
+            _verify_wsl_models(profile)
+
+        self.assertEqual(prefix + ["git", "rev-parse", "HEAD"], calls[0])
+        self.assertEqual(
+            prefix + ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+            calls[1],
+        )
+        self.assertTrue(any(command[len(prefix) :][0] == "cat" for command in calls))
+        self.assertTrue(
+            any("/snapshots/" in command[-1] and "/refs/main" not in command[-1] for command in calls)
+        )
+
     def test_wsl_path_uses_forward_slashes_for_windows_argument(self) -> None:
         completed = mock.Mock(returncode=0, stdout=b"/mnt/d/project/live2d/source.png\n", stderr=b"")
         path = Path("D:/project/live2d/source.png")
@@ -1336,8 +1523,214 @@ class GateFModelWorkerTests(unittest.TestCase):
         self.assertEqual(path.resolve().as_posix(), command[-1])
         self.assertNotIn("\\", command[-1])
 
-    def test_wsl_invocation_forces_offline_pinned_model_paths(self) -> None:
+    def test_native_path_is_identity_and_rejects_symlinks_or_root_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            regular = root / "regular.png"
+            regular.write_bytes(b"source")
+            self.assertEqual(regular.resolve().as_posix(), _native_path(regular, allowed_root=root))
+            outside = root.parent / f"{root.name}-outside.png"
+            outside.write_bytes(b"outside")
+            try:
+                with self.assertRaisesRegex(StageContractError, "outside the allowed root"):
+                    _native_path(outside, allowed_root=root)
+                symlink = root / "source-link.png"
+                try:
+                    symlink.symlink_to(regular)
+                except (NotImplementedError, OSError):
+                    return
+                with self.assertRaisesRegex(StageContractError, "symlink"):
+                    _native_path(symlink, allowed_root=root)
+            finally:
+                outside.unlink(missing_ok=True)
+
+    def test_runtime_kind_dispatches_without_crossing_strategies(self) -> None:
         profile, _ = _load_profile()
+        completed = (mock.Mock(returncode=1), None)
+        with mock.patch(
+            "spikes.gate_f_runner.model_worker._invoke_native",
+            return_value=completed,
+        ) as native, mock.patch("spikes.gate_f_runner.model_worker._invoke_wsl") as wsl:
+            self.assertIs(completed, _invoke_model(Path("source"), Path("output"), profile, 30))
+        native.assert_called_once()
+        wsl.assert_not_called()
+
+        wsl_profile = _wsl_profile()
+        with mock.patch("spikes.gate_f_runner.model_worker._invoke_native") as native, mock.patch(
+            "spikes.gate_f_runner.model_worker._invoke_wsl",
+            return_value=completed,
+        ) as wsl:
+            self.assertIs(completed, _invoke_model(Path("source"), Path("output"), wsl_profile, 30))
+        wsl.assert_called_once()
+        native.assert_not_called()
+
+    def test_native_invocation_matches_verified_ground_truth_shape(self) -> None:
+        profile, _ = _load_profile()
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def completed(command, **kwargs):
+            calls.append((command, kwargs))
+            return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            code_root = home / "oneclick2d-model-spikes" / "see-through"
+            (code_root / ".venv" / "bin").mkdir(parents=True)
+            (code_root / ".venv" / "bin" / "python").write_bytes(b"python")
+            (code_root / "common").mkdir()
+            (code_root / "models" / "hf-cache").mkdir(parents=True)
+            source = home / "source.png"
+            source.write_bytes(b"source")
+            output = home / "output"
+            output.mkdir()
+            with mock.patch.object(Path, "home", return_value=home), mock.patch(
+                "spikes.gate_f_runner.model_worker._verify_native_models"
+            ), mock.patch(
+                "spikes.gate_f_runner.model_worker.secrets.token_hex",
+                return_value="cd" * 32,
+            ), mock.patch(
+                "spikes.gate_f_runner.model_worker._consume_entrypoint_attestation"
+            ) as consume, mock.patch(
+                "spikes.gate_f_runner.model_worker._run_checked",
+                side_effect=completed,
+            ):
+                with mock.patch.dict(os.environ, {"WSLENV": "DO_NOT_FORWARD", "PYTHONPATH": "untrusted"}):
+                    _invoke_native(source, output, profile, 30)
+
+            command, kwargs = calls[-1]
+            process_env = kwargs["env"]
+            self.assertEqual(code_root, kwargs["cwd"])
+            self.assertEqual((code_root / ".venv" / "bin" / "python").as_posix(), command[0])
+            self.assertEqual(V6_ENTRYPOINT.resolve().as_posix(), command[1])
+            self.assertNotIn("wsl.exe", command)
+            self.assertNotIn("--srcp", command)
+            self.assertNotIn(source.resolve().as_posix(), command)
+            self.assertEqual((output / "input").resolve().as_posix(), command[command.index("--save_dir") + 1])
+            self.assertEqual("1", process_env["HF_HUB_OFFLINE"])
+            self.assertEqual("1", process_env["TRANSFORMERS_OFFLINE"])
+            self.assertEqual((code_root / "models" / "hf-cache").as_posix(), process_env["HF_HOME"])
+            self.assertEqual("expandable_segments:True", process_env["PYTORCH_CUDA_ALLOC_CONF"])
+            self.assertEqual(source.resolve().as_posix(), process_env["ONECLICK2D_ATTESTATION_SOURCE"])
+            self.assertEqual("cd" * 32, process_env["ONECLICK2D_ATTESTATION_CHALLENGE"])
+            self.assertNotIn("WSLENV", process_env)
+            self.assertNotIn("PYTHONPATH", process_env)
+            consume.assert_called_once_with(
+                output / "input" / ".entrypoint-attestation.json",
+                expected_challenge="cd" * 32,
+                source=source,
+            )
+
+    def test_native_scheduler_cache_requires_main_ref_and_pinned_snapshot(self) -> None:
+        profile, _ = _load_profile()
+        commit = "a" * 40
+        config_bytes = b'{"scheduler":"pinned"}\n'
+        digest = _git_blob_sha1(config_bytes)
+        models = []
+        for model in profile["models"]:
+            if model["role"] != "scheduler_configuration":
+                models.append(model)
+                continue
+            resolution = {
+                **model["runtime_resolution"],
+                "resolved_commit": commit,
+            }
+            models.append(
+                {
+                    **model,
+                    "revision": commit,
+                    "config_files": [
+                        {"path": "scheduler/scheduler_config.json", "git_blob_sha1": digest}
+                    ],
+                    "runtime_resolution": resolution,
+                }
+            )
+        changed_profile = {**profile, "models": models}
+
+        with tempfile.TemporaryDirectory() as directory:
+            code_root = Path(directory).resolve()
+            cache_root = (
+                code_root
+                / "models"
+                / "hf-cache"
+                / "hub"
+                / "models--frankjoshua--juggernautXL_version6Rundiffusion"
+            )
+            (cache_root / "refs").mkdir(parents=True)
+            (cache_root / "blobs").mkdir()
+            snapshot_directory = cache_root / "snapshots" / commit / "scheduler"
+            snapshot_directory.mkdir(parents=True)
+            ref = cache_root / "refs" / "main"
+            blob = cache_root / "blobs" / digest
+            snapshot = snapshot_directory / "scheduler_config.json"
+            ref.write_text(commit + "\n", encoding="ascii")
+            blob.write_bytes(config_bytes)
+            try:
+                snapshot.symlink_to(blob)
+            except (NotImplementedError, OSError):
+                self.skipTest("symlinks are unavailable")
+
+            _verify_native_scheduler_cache(changed_profile, code_root)
+            ref.write_text("b" * 40 + "\n", encoding="ascii")
+            with self.assertRaisesRegex(StageContractError, "cache ref mismatch"):
+                _verify_native_scheduler_cache(changed_profile, code_root)
+
+            ref.write_text(commit + "\n", encoding="ascii")
+            snapshot.unlink()
+            outside = code_root / "outside.json"
+            outside.write_bytes(config_bytes)
+            snapshot.symlink_to(outside)
+            with self.assertRaisesRegex(StageContractError, "cache snapshot is invalid"):
+                _verify_native_scheduler_cache(changed_profile, code_root)
+
+    def test_native_model_verification_rejects_symlinked_model_file(self) -> None:
+        profile, _ = _load_profile()
+        config_bytes = b"pinned config\n"
+        digest = _git_blob_sha1(config_bytes)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            code_root = home / "oneclick2d-model-spikes" / "see-through"
+            upstream = code_root / "inference" / "scripts" / "inference_psd_quantized.py"
+            upstream.parent.mkdir(parents=True)
+            upstream.write_bytes(b"upstream")
+            models = []
+            for index, model in enumerate(profile["models"]):
+                local_dir = f"models/model-{index}"
+                model_root = code_root / local_dir
+                model_root.mkdir(parents=True)
+                config = model_root / "config.json"
+                if index == 1:
+                    target = code_root / "shared-config.json"
+                    target.write_bytes(config_bytes)
+                    try:
+                        config.symlink_to(target)
+                    except (NotImplementedError, OSError):
+                        self.skipTest("symlinks are unavailable")
+                else:
+                    config.write_bytes(config_bytes)
+                models.append(
+                    {
+                        **model,
+                        "local_dir_relative_to_code_root": local_dir,
+                        "config_files": [{"path": "config.json", "git_blob_sha1": digest}],
+                        "weights": [],
+                    }
+                )
+            changed_profile = {**profile, "models": models}
+            completed = [
+                mock.Mock(returncode=0, stdout=(profile["code"]["commit"] + "\n").encode("ascii")),
+                mock.Mock(returncode=0, stdout=b""),
+                mock.Mock(returncode=0, stdout=("a" * 40 + "\n").encode("ascii")),
+                mock.Mock(returncode=0, stdout=("a" * 40 + "\n").encode("ascii")),
+            ]
+            with mock.patch.object(Path, "home", return_value=home), mock.patch(
+                "spikes.gate_f_runner.model_worker._run_checked",
+                side_effect=completed,
+            ):
+                with self.assertRaisesRegex(StageContractError, "native path contains a symlink"):
+                    _verify_native_models(changed_profile)
+
+    def test_wsl_invocation_forces_offline_pinned_model_paths(self) -> None:
+        profile = _wsl_profile()
         calls: list[tuple[list[str], dict[str, str] | None]] = []
 
         def completed(command, **kwargs):
@@ -1384,6 +1777,7 @@ class GateFModelWorkerTests(unittest.TestCase):
             }.issubset(set(process_env["WSLENV"].split(":")))
         )
         self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", command)
+        self.assertNotIn("PYTHONPATH=common", command)
         self.assertIn("--cpu_offload", command)
         self.assertIn("--no_group_offload", command)
         self.assertIn("models/seethroughv0.0.2_layerdiff3d_nf4", command)
@@ -1395,7 +1789,7 @@ class GateFModelWorkerTests(unittest.TestCase):
         )
 
     def test_wsl_invocations_never_reuse_attestation_challenges(self) -> None:
-        profile, _ = _load_profile()
+        profile = _wsl_profile()
         commands: list[list[str]] = []
         environments: list[dict[str, str]] = []
 
@@ -1452,7 +1846,7 @@ class GateFModelWorkerTests(unittest.TestCase):
                 side_effect=StageContractError("isolated model command timed out"),
             ), redirect_stderr(stderr):
                 self.assertEqual(70, main())
-            self.assertEqual("model spike failed: isolated model worker error\n", stderr.getvalue())
+            self.assertEqual("model spike failed: local model worker error\n", stderr.getvalue())
             self.assertNotIn(str(source), stderr.getvalue())
             self.assertFalse((workspace / "run.timeout").exists())
 
@@ -1479,7 +1873,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ):
                 report = run_model_worker(source, output, timeout_seconds=30)
             self.assertTrue(report["model_used"])
@@ -1531,7 +1925,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ):
                 with self.assertRaisesRegex(
                     StageContractError,
@@ -1561,7 +1955,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 return _inventory(directory_path)
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ), mock.patch(
                 "spikes.gate_f_runner.model_worker._inventory",
                 side_effect=inventory_after_mutation,
@@ -1586,7 +1980,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout=b"", stderr=b""), summary
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ):
                 with self.assertRaisesRegex(
                     StageContractError,
@@ -1611,7 +2005,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ):
                 with self.assertRaisesRegex(StageContractError, "semantic metadata is invalid"):
                     run_model_worker(source, output, timeout_seconds=30)
@@ -1634,7 +2028,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ):
                 with self.assertRaisesRegex(StageContractError, "semantic ontology is invalid"):
                     run_model_worker(source, output, timeout_seconds=30)
@@ -1655,7 +2049,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ):
                 with self.assertRaisesRegex(StageContractError, "model worker PSD is invalid"):
                     run_model_worker(source, output, timeout_seconds=30)
@@ -1676,7 +2070,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ):
                 with self.assertRaisesRegex(StageContractError, "model worker depth PSD is invalid"):
                     run_model_worker(source, output, timeout_seconds=30)
@@ -1700,7 +2094,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
                 )
 
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl", side_effect=invoke
+                "spikes.gate_f_runner.model_worker._invoke_model", side_effect=invoke
             ):
                 with self.assertRaisesRegex(StageContractError, "PSD metadata is invalid"):
                     run_model_worker(source, output, timeout_seconds=30)
@@ -1712,7 +2106,7 @@ class GateFModelWorkerPillowTests(unittest.TestCase):
             source.write_bytes(b"source")
             output = root / "output"
             with mock.patch("spikes.gate_f_runner.model_worker._verify_runtime"), mock.patch(
-                "spikes.gate_f_runner.model_worker._invoke_wsl",
+                "spikes.gate_f_runner.model_worker._invoke_model",
                 return_value=(mock.Mock(returncode=1, stdout=b"", stderr=b"private detail"), None),
             ):
                 with self.assertRaisesRegex(StageContractError, "model worker process failed"):

@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-model-motion-draft/v0.3/report.schema.json",
+  "title": "OneClick2D Gate F Model Motion Draft Report v0.3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "scope", "run_id", "profile", "input", "layers", "geometry", "parameters", "bindings", "sequence", "frames", "validation", "quality", "claims"],
+  "properties": {
+    "format": {"const": "oneclick2d.model-motion-draft-report"},
+    "format_version": {"const": "0.3.0"},
+    "scope": {"const": "disposable-local-model-spike"},
+    "run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "algorithm_id", "config_sha256", "renderer_contract_id", "renderer_profile_id"],
+      "properties": {
+        "id": {"const": "oc2d.spike.model-motion-draft.affine-semantic.v15"},
+        "algorithm_id": {"const": "source-visible-features-feathered-underpaint-grouped-eye-subject-matte-hard-edge-padded-quad-affine-premultiplied.v13"},
+        "config_sha256": {"const": "37282e13e7093384174eace5a0e9d0d1a4b2230d16861623dbb52721ecfbcc39"},
+        "renderer_contract_id": {"const": "oc2d.spike.pillow-rgba-renderer.v1"},
+        "renderer_profile_id": {"const": "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2"}
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_result_sha256", "model_profile_id", "reconstruction_sha256", "canvas"],
+      "properties": {
+        "model_result_sha256": {"$ref": "#/$defs/sha256"},
+        "model_profile_id": {"const": "see-through.v3.nf4.1280.source-preserve.v6"},
+        "reconstruction_sha256": {"$ref": "#/$defs/sha256"},
+        "canvas": {"type": "array", "prefixItems": [{"const": 1280}, {"const": 1280}], "minItems": 2, "maxItems": 2}
+      }
+    },
+    "layers": {"type": "array", "minItems": 6, "maxItems": 40, "items": {"$ref": "#/$defs/layer"}},
+    "geometry": {"type": "array", "minItems": 6, "maxItems": 40, "items": {"$ref": "#/$defs/geometry"}},
+    "parameters": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "object"}},
+    "bindings": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "object"}},
+    "sequence": {"type": "object"},
+    "frames": {"type": "array", "minItems": 37, "maxItems": 37, "items": {"$ref": "#/$defs/frame"}},
+    "validation": {"type": "object"},
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "review_items"],
+      "properties": {
+        "status": {"const": "review_required"},
+        "review_items": {"type": "array", "minItems": 3, "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_used", "quad_mesh_research_draft", "affine_binding_research_draft", "dynamic_preview_research_draft", "mesh_delta_generated", "oc2d_produced", "moc3_produced", "gate_f_feasibility_proven"],
+      "properties": {
+        "model_used": {"const": true},
+        "quad_mesh_research_draft": {"const": true},
+        "affine_binding_research_draft": {"const": true},
+        "dynamic_preview_research_draft": {"const": true},
+        "mesh_delta_generated": {"const": false},
+        "oc2d_produced": {"const": false},
+        "moc3_produced": {"const": false},
+        "gate_f_feasibility_proven": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "box": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}, {"type": "integer"}, {"type": "integer"}], "minItems": 4, "maxItems": 4},
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "semantic", "side", "source_artifact_id", "box_ltrb", "draw_order", "motion_group", "artifact"],
+      "properties": {
+        "id": {"type": "string"},
+        "semantic": {"type": "string"},
+        "side": {"enum": ["left", "right", "not-applicable"]},
+        "source_artifact_id": {"type": "string"},
+        "box_ltrb": {"$ref": "#/$defs/box"},
+        "draw_order": {"type": "integer", "minimum": 0},
+        "motion_group": {"enum": ["static", "head", "eye", "mouth"]},
+        "artifact": {"$ref": "#/$defs/layerArtifact"}
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "layer_id", "vertices_xy", "triangle_indices", "winding"],
+      "properties": {
+        "id": {"type": "string"},
+        "layer_id": {"type": "string"},
+        "vertices_xy": {"type": "array", "minItems": 4, "maxItems": 4},
+        "triangle_indices": {"const": [0, 1, 2, 0, 2, 3]},
+        "winding": {"const": "positive-screen-y-down"}
+      }
+    },
+    "layerArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "uri", "media_type", "byte_length", "sha256", "width", "height", "mode"],
+      "properties": {
+        "id": {"type": "string"},
+        "uri": {"type": "string"},
+        "media_type": {"const": "image/png"},
+        "byte_length": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "width": {"type": "integer", "minimum": 1, "maximum": 1280},
+        "height": {"type": "integer", "minimum": 1, "maximum": 1280},
+        "mode": {"const": "RGBA"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "uri", "media_type", "byte_length", "sha256", "width", "height", "mode"],
+      "properties": {
+        "id": {"type": "string"},
+        "uri": {"type": "string"},
+        "media_type": {"const": "image/png"},
+        "byte_length": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "width": {"const": 1280},
+        "height": {"const": 1280},
+        "mode": {"const": "RGBA"}
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "id", "source", "parameters", "artifact"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0, "maximum": 36},
+        "id": {"type": "string"},
+        "source": {"enum": ["mandatory", "seeded-trajectory"]},
+        "parameters": {"type": "object"},
+        "artifact": {"$ref": "#/$defs/artifact"}
+      }
+    }
+  }
+}

@@ -1,8 +1,8 @@
 {
   "format": "oneclick2d.model-motion-draft-config",
-  "format_version": "0.2.0",
-  "profile_id": "oc2d.spike.model-motion-draft.affine-semantic.v14",
-  "required_model_profile_id": "see-through.v3.nf4.1280.wsl2.source-preserve.v5",
+  "format_version": "0.3.0",
+  "profile_id": "oc2d.spike.model-motion-draft.affine-semantic.v15",
+  "required_model_profile_id": "see-through.v3.nf4.1280.source-preserve.v6",
   "required_pillow_version": "12.1.0",
   "frame_sequence": {
     "format": "oneclick2d.gate-f-frame-sequence-config",

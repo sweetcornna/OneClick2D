@@ -1,8 +1,8 @@
 # Gate F single-item model candidate preflight
 
-This schema v0.2 frozen configuration adapts one already validated active `source-preserve.v5` model run and its validated motion draft into a deterministic, independently reloadable candidate/comparator parity preflight.
+This schema v0.3 frozen configuration adapts one already validated active `source-preserve.v6` model run and its validated motion draft into a deterministic, independently reloadable candidate/comparator parity preflight.
 
-The adapter maps all 16 ontology registry slots, records character-anatomical side, recomputes and byte-verifies every motion layer and all 37 candidate frames, normalizes the same model source for the fixed simple-cutout comparator, and requires exact arm identity parity. Its published semantic-union mask is partitioned into disjoint source-visible and source-transparent-exposed masks using the active v5 rule: source alpha greater than 31 is source-visible, while source alpha from 0 through 31 is source-transparent-exposed where a cleaned semantic layer is present. Runtime artifacts remain under the ignored local workspace and are never committed by this example.
+The adapter maps all 16 ontology registry slots, records character-anatomical side, recomputes and byte-verifies every motion layer and all 37 candidate frames, normalizes the same model source for the fixed simple-cutout comparator, and requires exact arm identity parity. Its published semantic-union mask is partitioned into disjoint source-visible and source-transparent-exposed masks using the active v6 rule: source alpha greater than 31 is source-visible, while source alpha from 0 through 31 is source-transparent-exposed where a cleaned semantic layer is present. Runtime artifacts remain under the ignored local workspace and are never committed by this example.
 
 Run only after `model` and `motion` have completed for a rights-cleared local input:
 
