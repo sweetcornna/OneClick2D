@@ -35,6 +35,11 @@ datasets/
 *.pt
 *.pth
 
+# Agent session state and tool scratch. Session evidence under .claude/ records
+# host paths and run logs, which the logging boundary keeps out of the repository.
+.claude/
+.playwright-mcp/
+
 # Logs, diagnostics, profiling
 *.log
 logs/
