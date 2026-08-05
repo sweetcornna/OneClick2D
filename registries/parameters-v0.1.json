@@ -1,0 +1,165 @@
+{
+  "coordinate_convention": {
+    "angle_unit": "degree",
+    "image_origin": "top-left",
+    "side": "character-anatomical"
+  },
+  "evaluation": {
+    "combination_order": "registry_order_then_binding_id",
+    "extrapolation": "clamp",
+    "interpolation_1d": "linear"
+  },
+  "parameters": [
+    {
+      "capability": "candidate_mandatory",
+      "id": "head.yaw",
+      "neutral": 0.0,
+      "roles": [
+        "manual",
+        "tracking"
+      ],
+      "sign": "positive_nose_toward_screen_right",
+      "template_range": [
+        -15.0,
+        15.0
+      ],
+      "unit": "degree"
+    },
+    {
+      "capability": "candidate_mandatory",
+      "id": "head.pitch",
+      "neutral": 0.0,
+      "roles": [
+        "manual",
+        "tracking"
+      ],
+      "sign": "positive_looks_up",
+      "template_range": [
+        -10.0,
+        10.0
+      ],
+      "unit": "degree"
+    },
+    {
+      "capability": "candidate_mandatory",
+      "id": "eye.left.open",
+      "neutral": 1.0,
+      "roles": [
+        "manual",
+        "tracking"
+      ],
+      "sign": "positive_more_open",
+      "template_range": [
+        0.0,
+        1.0
+      ],
+      "unit": "normalized"
+    },
+    {
+      "capability": "candidate_mandatory",
+      "id": "eye.right.open",
+      "neutral": 1.0,
+      "roles": [
+        "manual",
+        "tracking"
+      ],
+      "sign": "positive_more_open",
+      "template_range": [
+        0.0,
+        1.0
+      ],
+      "unit": "normalized"
+    },
+    {
+      "capability": "candidate_optional",
+      "id": "eye.gaze.x",
+      "neutral": 0.0,
+      "roles": [
+        "manual",
+        "tracking"
+      ],
+      "sign": "positive_screen_right",
+      "template_range": [
+        -1.0,
+        1.0
+      ],
+      "unit": "normalized"
+    },
+    {
+      "capability": "candidate_optional",
+      "id": "eye.gaze.y",
+      "neutral": 0.0,
+      "roles": [
+        "manual",
+        "tracking"
+      ],
+      "sign": "positive_up",
+      "template_range": [
+        -1.0,
+        1.0
+      ],
+      "unit": "normalized"
+    },
+    {
+      "capability": "candidate_mandatory",
+      "id": "mouth.open",
+      "neutral": 0.0,
+      "roles": [
+        "manual",
+        "tracking"
+      ],
+      "sign": "positive_more_open",
+      "template_range": [
+        0.0,
+        1.0
+      ],
+      "unit": "normalized"
+    },
+    {
+      "capability": "candidate_optional",
+      "id": "mouth.form",
+      "neutral": 0.0,
+      "roles": [
+        "manual",
+        "tracking"
+      ],
+      "sign": "negative_narrow_positive_wide",
+      "template_range": [
+        -1.0,
+        1.0
+      ],
+      "unit": "normalized"
+    },
+    {
+      "capability": "research_optional",
+      "id": "body.lean",
+      "neutral": 0.0,
+      "roles": [
+        "manual"
+      ],
+      "sign": "positive_screen_right",
+      "template_range": [
+        -1.0,
+        1.0
+      ],
+      "unit": "normalized"
+    },
+    {
+      "capability": "research_optional",
+      "id": "breath",
+      "neutral": 0.0,
+      "roles": [
+        "manual"
+      ],
+      "sign": "positive_inhale",
+      "template_range": [
+        0.0,
+        1.0
+      ],
+      "unit": "normalized"
+    }
+  ],
+  "registry": "oneclick2d.parameters",
+  "status": "gate-f-candidate",
+  "version": "0.1.0"
+}
