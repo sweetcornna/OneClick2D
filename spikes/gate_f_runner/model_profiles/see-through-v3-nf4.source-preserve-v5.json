@@ -1,0 +1,177 @@
+{
+  "format": "oneclick2d.model-spike-profile",
+  "format_version": "0.1.0",
+  "profile_id": "see-through.v3.nf4.1280.wsl2.source-preserve.v5",
+  "code": {
+    "repository": "https://github.com/shitagaki-lab/see-through.git",
+    "commit": "58a1cb11d13f85acec9bbddb8cd4b6487843d4cf",
+    "license": "Apache-2.0"
+  },
+  "runtime": {
+    "kind": "wsl2",
+    "distribution": "Ubuntu",
+    "code_root_relative_to_home": "oneclick2d-model-spikes/see-through",
+    "python_relative_to_code_root": ".venv/bin/python",
+    "python_version": "3.12.13",
+    "torch_version": "2.8.0+cu128",
+    "cuda_version": "12.8",
+    "dependencies_profile": "requirements-see-through-v3-nf4-wsl2.txt",
+    "dependencies_sha256": "dac624bb1f3644734fce4f67a14b54bf54241a8719aa2ff829bc3e77961fe1d5",
+    "timm_commit": "6e3fdda39508db30766f9d9e6ec32380ebee8b8c",
+    "versions": {
+      "accelerate": "1.13.0",
+      "bitsandbytes": "0.49.2",
+      "diffusers": "0.37.0",
+      "einops": "0.8.2",
+      "huggingface-hub": "1.7.2",
+      "kornia": "0.8.2",
+      "matplotlib": "3.9.4",
+      "numpy": "2.2.6",
+      "opencv-python": "4.13.0.92",
+      "pillow": "12.1.1",
+      "psd-tools": "1.14.2",
+      "pyyaml": "6.0.3",
+      "safetensors": "0.7.0",
+      "scikit-image": "0.25.2",
+      "scikit-learn": "1.7.2",
+      "scipy": "1.15.3",
+      "timm": "1.0.26.dev0",
+      "torch": "2.8.0+cu128",
+      "torchaudio": "2.8.0+cu128",
+      "torchvision": "0.23.0+cu128",
+      "transformers": "5.0.0"
+    }
+  },
+  "entrypoint": {
+    "path": "see_through_v3_nf4_source_preserve_v5.py",
+    "sha256": "8732db76c4fcf3f4bf7e94f3a206456ffbf9bd78ef773aa66d9b793c6f8f1ac5",
+    "upstream_script": "inference/scripts/inference_psd_quantized.py",
+    "device_policy": {
+      "path": "nf4_marigold_device_policy.py",
+      "sha256": "569e0ced8bcc4b144bfc787e0e37f2d90fc263081ceac3c063eabf26ce1c14df"
+    }
+  },
+  "models": [
+    {
+      "role": "scheduler_configuration",
+      "repository": "frankjoshua/juggernautXL_version6Rundiffusion",
+      "revision": "aadab4c7cb252b83a0e2d6f3386b8c837af23932",
+      "local_dir_relative_to_code_root": "models/juggernautXL_version6Rundiffusion",
+      "license_status": "configuration-only-no-weights",
+      "config_files": [
+        {"path": "scheduler/scheduler_config.json", "git_blob_sha1": "f967e9ad6d6a6d1a78f47ca809d3e170a43e3053"}
+      ],
+      "weights": []
+    },
+    {
+      "role": "semantic_layer_generation",
+      "repository": "24yearsold/seethroughv0.0.2_layerdiff3d_nf4",
+      "revision": "39b9881340189810bebabe5462756fb2e8fbd5fa",
+      "local_dir_relative_to_code_root": "models/seethroughv0.0.2_layerdiff3d_nf4",
+      "license_status": "upstream-project-claims-apache-2.0-repository-metadata-missing",
+      "config_files": [
+        {"path": ".gitattributes", "git_blob_sha1": "a6344aac8c09253b3b630fb776ae94478aa0275b"},
+        {"path": "model_index.json", "git_blob_sha1": "3bf962198a9bcee304310516457916338f909520"},
+        {"path": "scheduler/scheduler_config.json", "git_blob_sha1": "ed256528d77fda40249c8ab68434fa2e0178aaff"},
+        {"path": "text_encoder/config.json", "git_blob_sha1": "4adbe56868f6be11c47afe916d28dd109f68d8d9"},
+        {"path": "text_encoder_2/config.json", "git_blob_sha1": "bdda46e43518bc8b7ed982426cbde2fe22267c2d"},
+        {"path": "tokenizer/merges.txt", "git_blob_sha1": "76e821f1b6f0a9709293c3b6b51ed90980b3166b"},
+        {"path": "tokenizer/special_tokens_map.json", "git_blob_sha1": "b5018cd2c0d0f31e08ba78d639e05736101ca08a"},
+        {"path": "tokenizer/tokenizer_config.json", "git_blob_sha1": "0ad88c5e80ee19b52006a7330ae588a34a399848"},
+        {"path": "tokenizer/vocab.json", "git_blob_sha1": "469be27c5c010538f845f518c4f5e8574c78f7c8"},
+        {"path": "tokenizer_2/merges.txt", "git_blob_sha1": "76e821f1b6f0a9709293c3b6b51ed90980b3166b"},
+        {"path": "tokenizer_2/special_tokens_map.json", "git_blob_sha1": "eaf8780e3c90b1af01a8574bf8596a9acebe6858"},
+        {"path": "tokenizer_2/tokenizer_config.json", "git_blob_sha1": "dc097ae967f931ac94b3762db0073a76abf66b41"},
+        {"path": "tokenizer_2/vocab.json", "git_blob_sha1": "469be27c5c010538f845f518c4f5e8574c78f7c8"},
+        {"path": "trans_vae/config.json", "git_blob_sha1": "b87fabc870d5f3ed2a0c9990d168394693ac7fac"},
+        {"path": "unet/config.json", "git_blob_sha1": "e5d4ae1838c42de6c5dfdb1926690b6c65896afb"},
+        {"path": "vae/config.json", "git_blob_sha1": "52868beadc84182071c8bc41804560dac30bc660"}
+      ],
+      "weights": [
+        {
+          "path": "text_encoder/model.safetensors",
+          "byte_length": 124089024,
+          "sha256": "2a54f4b63f049d5f219b258c2cbdbc32576d3b99d87406d3c6537706eb7c75a2"
+        },
+        {
+          "path": "text_encoder_2/model.safetensors",
+          "byte_length": 485089576,
+          "sha256": "f020fa75fa059f09b666bb4afa75c9637425a304a3e37c03e5fc979c2e07cdf7"
+        },
+        {
+          "path": "trans_vae/diffusion_pytorch_model.safetensors",
+          "byte_length": 210639792,
+          "sha256": "925ffed4df7b2f57dbb549ac1ef374a26a1ead8d247eaf054dab641f82a8e0b7"
+        },
+        {
+          "path": "unet/diffusion_pytorch_model.safetensors",
+          "byte_length": 2774123207,
+          "sha256": "854ce2d0cb639416b9e5eadf95c4eef3ce6ac00c3bb6eee7e7cf8034723b7565"
+        },
+        {
+          "path": "vae/diffusion_pytorch_model.safetensors",
+          "byte_length": 167335590,
+          "sha256": "ce4b137acad050c9072769cfb02fdc6ecb8dc0957586db5f6fab71d18103ccc1"
+        }
+      ]
+    },
+    {
+      "role": "semantic_layer_depth",
+      "repository": "24yearsold/seethroughv0.0.1_marigold_nf4",
+      "revision": "aad13aafa9f3c72defb40a9d9225cec70b0eab16",
+      "local_dir_relative_to_code_root": "models/seethroughv0.0.1_marigold_nf4",
+      "license_status": "metadata-missing-upstream-openrail-lineage-review-required",
+      "config_files": [
+        {"path": ".gitattributes", "git_blob_sha1": "a6344aac8c09253b3b630fb776ae94478aa0275b"},
+        {"path": "model_index.json", "git_blob_sha1": "503a2ec28d6d20759efc004ee4be4cfd224a48d3"},
+        {"path": "scheduler/scheduler_config.json", "git_blob_sha1": "077bfbd780f0c0a7898ae7a1a7197c79aed8a48b"},
+        {"path": "text_encoder/config.json", "git_blob_sha1": "08b551f0d2304d55817bc8ab5cd77ee183f430c7"},
+        {"path": "tokenizer/merges.txt", "git_blob_sha1": "76e821f1b6f0a9709293c3b6b51ed90980b3166b"},
+        {"path": "tokenizer/special_tokens_map.json", "git_blob_sha1": "ae0c5be6f35217e51c4c000fd325d8de0294e99c"},
+        {"path": "tokenizer/tokenizer_config.json", "git_blob_sha1": "94655315ab76e016a2ae4c594e13df5c54342183"},
+        {"path": "tokenizer/vocab.json", "git_blob_sha1": "469be27c5c010538f845f518c4f5e8574c78f7c8"},
+        {"path": "unet/config.json", "git_blob_sha1": "ad7c1bcd6a74a108052015d6041a54c6da2bf712"},
+        {"path": "vae/config.json", "git_blob_sha1": "3de849a1cb61c767c47ce3ebf54507975ba32414"}
+      ],
+      "weights": [
+        {
+          "path": "text_encoder/model.safetensors",
+          "byte_length": 264872716,
+          "sha256": "acae8b5f8324c2bc87ad94a1cfc8495ce2b8d31b25aa6623f8da0bf1677cc95b"
+        },
+        {
+          "path": "unet/diffusion_pytorch_model.safetensors",
+          "byte_length": 1494967495,
+          "sha256": "b66d2601bed0be56b4e17bc38487baf30f458eb91b2934479a2c75efecab8937"
+        },
+        {
+          "path": "vae/diffusion_pytorch_model.safetensors",
+          "byte_length": 167335590,
+          "sha256": "8d0c34f57abe50f323040f2366c8e22b941068dcdf53c8eb1d6fafb838afecb7"
+        }
+      ]
+    }
+  ],
+  "inference": {
+    "quantization": "nf4",
+    "seed": 42,
+    "resolution": 1280,
+    "depth_resolution": 768,
+    "inference_steps": 30,
+    "cpu_offload": true,
+    "group_offload": false,
+    "cuda_allocator": "expandable_segments:True",
+    "left_right_split": true
+  },
+  "postprocess": {
+    "algorithm_id": "source-visible-rgb-by-depth-mask-clean.v2",
+    "visible_alpha_threshold": 31,
+    "neutral_reconstruction": "source-rgb-with-max-cleaned-semantic-alpha"
+  },
+  "claims": {
+    "scope": "disposable-local-model-spike",
+    "gate_f_status": "GATE_F_NOT_EVALUATED",
+    "production_stack_selected": false,
+    "oc2d_produced": false
+  }
+}

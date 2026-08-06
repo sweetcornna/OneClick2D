@@ -48,8 +48,8 @@ from tests.test_gate_f_model_workbench import refresh_model_inventory
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-candidate" / "v0.2" / "report.schema.json"
-PREFLIGHT_REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-candidate" / "v0.2" / "preflight-report.schema.json"
+REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-candidate" / "v0.3" / "report.schema.json"
+PREFLIGHT_REPORT_SCHEMA = ROOT / "schemas" / "gate-f-model-candidate" / "v0.3" / "preflight-report.schema.json"
 
 
 def _json_schema_type_matches(value: object, expected: str) -> bool:
@@ -393,7 +393,7 @@ class GateFModelCandidateTests(unittest.TestCase):
             exposed.close()
             omission.close()
 
-    def test_v5_source_alpha_threshold_accepts_generated_rgb_only_through_31(self) -> None:
+    def test_v6_source_alpha_threshold_accepts_generated_rgb_only_through_31(self) -> None:
         from PIL import Image
 
         def prepare(run_dir: Path, *, mismatch_at_32: bool) -> tuple[list[tuple[int, int]], list[tuple[int, int, int]]]:

@@ -1,12 +1,12 @@
 # 模型动态研究初稿规范
 
 - **状态**：Gate F 前可丢弃预研；不是 CIR 或 `.oc2d`
-- **固定 profile**：`oc2d.spike.model-motion-draft.affine-semantic.v14`
+- **固定 profile**：`oc2d.spike.model-motion-draft.affine-semantic.v15`
 - **目的**：把受检 See-through 语义层接入确定性四边形、最小参数绑定和共享 37 帧轨迹，尽早暴露真实拆层在运动中的孔洞、接缝和语义错误。
 
 ## 输入边界
 
-输入必须是完整通过 `source-preserve.v5` 模型工作台校验的本地运行。生成器只读取清单内的 RGBA 语义层、重建图、模型结果摘要和固定帧序列配置；不调用模型、不读取外网、不修改模型产物。
+输入必须是完整通过模型工作台结构与证据校验、且模型身份精确匹配宿主中立 active profile `see-through.v3.nf4.1280.source-preserve.v6` 的本地运行；profile 身份不匹配仍硬失败。该 profile 当前只支持无隔离边界、仅限本机的原生 Linux 运行时。生成器只读取清单内的 RGBA 语义层、重建图、模型结果摘要和固定帧序列配置；不调用模型、不读取外网、不修改模型产物。中性保真门仍使用原有 coverage、exact ratio 和 RGB MAE 阈值及原判定逻辑；`neutral_fidelity.status != "pass"` 不再阻断 motion 生成，而会在报告中显式记录。
 
 ## 固定能力
 
@@ -18,7 +18,7 @@
 
 输出目录包含 37 个 RGBA 帧 PNG、`motion-report.json`，以及报告清单中供离线帧与摄像头预览共同使用的 repaired motion-layer PNG。报告固定记录输入摘要、部件/几何/绑定、帧参数、逐帧摘要、全部几何样本的有限性/索引/正面积验证，以及中性帧相对静态重建的 RGB 误差。所有默认参数帧使用同一主体遮罩和外轮廓清理结果，保证中性帧与轨迹首尾像素一致，同时保留实体内部的原图 RGB。
 
-读取器重新计算文件摘要、几何样本和中性帧误差；任何文件、摘要、画布、帧数、参数、引用、索引或验证值不匹配时必须失败。整体质量始终是 `review_required`，且必须保留以下边界：语义正确性、隐藏区域质量和动态视觉质量未评估；只存在 quad/affine research draft；未生成 mesh-delta、`.oc2d` 或 `.moc3`。
+读取器重新计算文件摘要、几何样本和中性帧误差；任何文件、摘要、画布、帧数、参数、引用、索引或验证值不匹配时必须失败。整体质量始终是 `review_required`。中性保真通过时 `quality.review_items` 与原行为一致；未通过时追加一条以 `FIDELITY_GATE_NOT_PASSED` 开头的告警，逐项写明 coverage、exact ratio、RGB MAE 的实测值和门限。该记录不改变上游 `neutral_fidelity.status`，也不表示保真门通过。报告还必须保留以下边界：语义正确性、隐藏区域质量和动态视觉质量未评估；只存在 quad/affine `research_draft`；未生成 mesh-delta、`.oc2d` 或 `.moc3`。
 
 ## 本地运行
 

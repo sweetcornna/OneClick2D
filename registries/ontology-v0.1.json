@@ -1,0 +1,113 @@
+{
+  "completion_statuses": [
+    "PRESENT",
+    "NOT_APPLICABLE",
+    "LOW_CONFIDENCE"
+  ],
+  "registry": "oneclick2d.ontology",
+  "side_convention": "character-anatomical",
+  "slots": [
+    {
+      "applicability": "required",
+      "cardinality": "exactly_one",
+      "id": "oc2d.character",
+      "parent": null
+    },
+    {
+      "applicability": "optional",
+      "cardinality": "zero_or_one",
+      "id": "oc2d.background",
+      "parent": null
+    },
+    {
+      "applicability": "required",
+      "cardinality": "exactly_one",
+      "id": "oc2d.face.base",
+      "parent": "oc2d.character"
+    },
+    {
+      "applicability": "required",
+      "cardinality": "exactly_one",
+      "id": "oc2d.eye.left",
+      "parent": "oc2d.face.base",
+      "side": "left"
+    },
+    {
+      "applicability": "required",
+      "cardinality": "exactly_one",
+      "id": "oc2d.eye.right",
+      "parent": "oc2d.face.base",
+      "side": "right"
+    },
+    {
+      "applicability": "conditional",
+      "cardinality": "zero_or_one",
+      "id": "oc2d.brow.left",
+      "parent": "oc2d.face.base",
+      "side": "left"
+    },
+    {
+      "applicability": "conditional",
+      "cardinality": "zero_or_one",
+      "id": "oc2d.brow.right",
+      "parent": "oc2d.face.base",
+      "side": "right"
+    },
+    {
+      "applicability": "required",
+      "cardinality": "exactly_one",
+      "id": "oc2d.mouth",
+      "parent": "oc2d.face.base"
+    },
+    {
+      "applicability": "conditional",
+      "cardinality": "zero_or_many",
+      "id": "oc2d.hair.front",
+      "parent": "oc2d.character"
+    },
+    {
+      "applicability": "conditional",
+      "cardinality": "zero_or_many",
+      "id": "oc2d.hair.side",
+      "parent": "oc2d.character"
+    },
+    {
+      "applicability": "conditional",
+      "cardinality": "zero_or_many",
+      "id": "oc2d.hair.back",
+      "parent": "oc2d.character"
+    },
+    {
+      "applicability": "conditional",
+      "cardinality": "zero_or_one",
+      "id": "oc2d.neck",
+      "parent": "oc2d.character"
+    },
+    {
+      "applicability": "required",
+      "cardinality": "exactly_one",
+      "id": "oc2d.torso",
+      "parent": "oc2d.character"
+    },
+    {
+      "applicability": "conditional",
+      "cardinality": "zero_or_many",
+      "id": "oc2d.clothing",
+      "parent": "oc2d.torso"
+    },
+    {
+      "applicability": "optional",
+      "cardinality": "zero_or_many",
+      "id": "oc2d.accessory.front",
+      "parent": "oc2d.character"
+    },
+    {
+      "applicability": "optional",
+      "cardinality": "zero_or_many",
+      "id": "oc2d.accessory.back",
+      "parent": "oc2d.character"
+    }
+  ],
+  "status": "gate-f-candidate",
+  "version": "0.1.0"
+}

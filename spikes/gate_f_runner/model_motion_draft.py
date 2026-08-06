@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import math
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -44,8 +45,8 @@ from .runtime import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "examples" / "gate-f-model-motion-draft" / "config.json"
-CONFIG_SHA256 = "b9fea23f0f78cad83a5a87ae453ef957107bb065cf482cde85e531781d0e1db9"
-PROFILE_ID = "oc2d.spike.model-motion-draft.affine-semantic.v14"
+CONFIG_SHA256 = "37282e13e7093384174eace5a0e9d0d1a4b2230d16861623dbb52721ecfbcc39"
+PROFILE_ID = "oc2d.spike.model-motion-draft.affine-semantic.v15"
 ALGORITHM_ID = "source-visible-features-feathered-underpaint-grouped-eye-subject-matte-hard-edge-padded-quad-affine-premultiplied.v13"
 REPORT_NAME = "motion-report.json"
 OUTPUT_DIRECTORY = "motion-draft"
@@ -56,6 +57,17 @@ SUBJECT_MATTE_ALPHA_THRESHOLD = 248
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 MAX_FRAME_BYTES = 64 * 1024 * 1024
 MAX_OUTPUT_BYTES = 512 * 1024 * 1024
+BASE_REVIEW_ITEMS = (
+    "semantic_correctness",
+    "hidden_region_completion",
+    "dynamic_visual_quality",
+)
+FIDELITY_GATE_WARNING_RE = re.compile(
+    r"FIDELITY_GATE_NOT_PASSED: neutral fidelity gate was not passed \(status=review_required\); "
+    r"coverage actual=\d+(?:\.\d+)? required==1\.0; "
+    r"exact_ratio actual=\d+(?:\.\d+)? required>=0\.995; "
+    r"rgb_mae actual=\d+(?:\.\d+)? required<=0\.5"
+)
 
 DRAW_ORDER = (
     "back hair",
@@ -133,6 +145,52 @@ class MotionRecomputation:
         self.underpaint_mask.close()
 
 
+def _fidelity_review_items(neutral_fidelity: dict[str, object]) -> list[str]:
+    review_items = list(BASE_REVIEW_ITEMS)
+    status = neutral_fidelity.get("status")
+    if status == "pass":
+        return review_items
+    if status != "review_required":
+        raise StageContractError("model motion draft neutral fidelity evidence is invalid")
+    thresholds = neutral_fidelity.get("pass_thresholds")
+    if not isinstance(thresholds, dict):
+        raise StageContractError("model motion draft neutral fidelity evidence is invalid")
+
+    def metric(value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise StageContractError("model motion draft neutral fidelity evidence is invalid")
+        return float(value)
+
+    coverage = metric(neutral_fidelity.get("source_visible_coverage_ratio"))
+    exact_ratio = metric(neutral_fidelity.get("source_rgb_exact_ratio"))
+    rgb_mae = metric(neutral_fidelity.get("source_rgb_mae"))
+    coverage_required = metric(thresholds.get("source_visible_coverage_ratio_minimum"))
+    exact_ratio_required = metric(thresholds.get("source_rgb_exact_ratio_minimum"))
+    rgb_mae_required = metric(thresholds.get("source_rgb_mae_maximum"))
+    review_items.append(
+        "FIDELITY_GATE_NOT_PASSED: neutral fidelity gate was not passed (status=review_required); "
+        f"coverage actual={coverage} required=={coverage_required}; "
+        f"exact_ratio actual={exact_ratio} required>={exact_ratio_required}; "
+        f"rgb_mae actual={rgb_mae} required<={rgb_mae_required}"
+    )
+    return review_items
+
+
+def _valid_quality(value: object) -> bool:
+    if not isinstance(value, dict) or value.get("status") != "review_required" or set(value) != {"status", "review_items"}:
+        return False
+    review_items = value.get("review_items")
+    if review_items == list(BASE_REVIEW_ITEMS):
+        return True
+    return (
+        isinstance(review_items, list)
+        and len(review_items) == len(BASE_REVIEW_ITEMS) + 1
+        and review_items[:len(BASE_REVIEW_ITEMS)] == list(BASE_REVIEW_ITEMS)
+        and isinstance(review_items[-1], str)
+        and FIDELITY_GATE_WARNING_RE.fullmatch(review_items[-1]) is not None
+    )
+
+
 def _config() -> tuple[dict[str, object], Any, Any]:
     value = strict_load_json_bytes(read_bounded_file(CONFIG_PATH, 64 * 1024))
     if not isinstance(value, dict) or sha256_bytes(canonical_json_bytes(value)) != CONFIG_SHA256:
@@ -148,7 +206,7 @@ def _config() -> tuple[dict[str, object], Any, Any]:
     if (
         set(value) != keys
         or value.get("format") != "oneclick2d.model-motion-draft-config"
-        or value.get("format_version") != "0.2.0"
+        or value.get("format_version") != "0.3.0"
         or value.get("profile_id") != PROFILE_ID
         or value.get("required_model_profile_id") != MODEL_PROFILE_ID
         or value.get("required_pillow_version") != "12.1.0"
@@ -974,11 +1032,13 @@ def generate_model_motion_draft(run_dir: Path) -> tuple[Path, dict[str, object]]
     if (
         not isinstance(identity, dict)
         or identity.get("profile_id") != MODEL_PROFILE_ID
-        or not isinstance(quality, dict)
-        or not isinstance(quality.get("neutral_fidelity"), dict)
-        or quality["neutral_fidelity"].get("status") != "pass"
+        or model_report.get("model_used") is not True
     ):
-        raise StageContractError("model motion draft requires a fidelity-passing active model profile")
+        raise StageContractError("model motion draft requires a matching active model profile identity and model_used evidence")
+    neutral_fidelity = quality.get("neutral_fidelity") if isinstance(quality, dict) else None
+    if not isinstance(neutral_fidelity, dict):
+        raise StageContractError("model motion draft neutral fidelity evidence is invalid")
+    review_items = _fidelity_review_items(neutral_fidelity)
     _, sequence_config, sequence = _config()
     backend = _load_pillow()
     model_report["_run_dir"] = str(run_dir)
@@ -1036,7 +1096,7 @@ def generate_model_motion_draft(run_dir: Path) -> tuple[Path, dict[str, object]]
         comparison = _neutral_comparison(reconstruction_path, temporary / str(Path(frames[0]["artifact"]["uri"]).name))
         report = {
             "format": "oneclick2d.model-motion-draft-report",
-            "format_version": "0.2.0",
+            "format_version": "0.3.0",
             "scope": "disposable-local-model-spike",
             "run_id": run_dir.name,
             "profile": {
@@ -1061,7 +1121,7 @@ def generate_model_motion_draft(run_dir: Path) -> tuple[Path, dict[str, object]]
             "validation": {**validation, **comparison},
             "quality": {
                 "status": "review_required",
-                "review_items": ["semantic_correctness", "hidden_region_completion", "dynamic_visual_quality"],
+                "review_items": review_items,
             },
             "claims": {
                 "model_used": True,
@@ -1123,7 +1183,7 @@ def load_model_motion_draft_report(
         not isinstance(report, dict)
         or set(report) != required
         or report.get("format") != "oneclick2d.model-motion-draft-report"
-        or report.get("format_version") != "0.2.0"
+        or report.get("format_version") != "0.3.0"
         or report.get("scope") != "disposable-local-model-spike"
         or report.get("run_id") != run_dir.name
     ):
@@ -1298,7 +1358,7 @@ def load_model_motion_draft_report(
     claims = report.get("claims")
     if (
         validation != expected_validation
-        or quality != {"status": "review_required", "review_items": ["semantic_correctness", "hidden_region_completion", "dynamic_visual_quality"]}
+        or not _valid_quality(quality)
         or claims != {"model_used": True, "quad_mesh_research_draft": True, "affine_binding_research_draft": True, "dynamic_preview_research_draft": True, "mesh_delta_generated": False, "oc2d_produced": False, "moc3_produced": False, "gate_f_feasibility_proven": False}
     ):
         raise StageContractError("model motion draft validation or claims are invalid")

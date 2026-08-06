@@ -25,6 +25,8 @@
 | R-018 | High | 格式演进/服务结束困住用户 | 最小语义、current-1、copy migration、支持期决策 | 转换器/reader/deprecation | Format / 1–4 |
 | R-019 | High | DB 恢复复活内容关联元数据 | no-backup catalog 或 crypto-erasure、tombstone、restore drill | 停止生成并 purge/reconcile | Privacy / 1–4 |
 | R-020 | High | 运营 cause 与质量 finding 混乱 | 单注册表双轴、mapping tests | fail closed、修 registry | Platform/Product / 1 |
+| R-022 | High | `oneclick2d/` 已实现完整确定性产品路径并通过独立复核，可能被误读为 Gate F 已通过或产品可用。实际上：语义拆层来自确定性解剖学布局先验，本体一律 `LOW_CONFIDENCE`（先验只定位区域、不识别解剖结构）；有限补全是边缘延展，不是生成模型也不恢复真实隐藏内容；无校准数据集，故 `confidence_facts.score` 与 `threshold_band` 全为 `unavailable`；输入信封与阈值仍是章程暂定值 | 能力边界写入 README/CONTRIBUTING/CLAUDE.md 与本表；模型驱动 provenance 在缺不可变 model/weights 摘要与权利登记记录前硬失败；`validate_project` 对每个 `LOW_CONFIDENCE` 槽位产出 review finding，报告状态止于 `pass_with_review`；PSD 互操作证据仅限"与写入器无共享代码的第三方读取器可打开"，不构成 Photoshop/Krita 声明 | 实现存在不等于 Gate 通过；Ready 判定仍以 Gate 证据为准，不得据此推导 Gate F 结论或对外声明产品可用 | Product/ML / F–1 |
+| R-021 | Critical | 中性保真门在当前单次真机样本下三项门限全部不通过，14286 个门视角漏失像素已拆成两种根因：12718（89.024220%）的逐层清理后 union alpha 为 0，支持入口有效 alpha 定义下的模型真实零分配，且其中源 alpha=255 有 10946；另 1568（10.975780%）的 union alpha 为 1..31，已存在非零层分配却被同数值阈值在不同标度上判为不可见，属于 postprocess/验收门标度不一致。全部覆盖像素以及这 1568 个低 alpha 像素的 RGB 均精确；RGB mismatch 与 MAE 来自 union 为 0 的 12718 个像素。motion 阻塞已降级为记录，但风险性质没有改变；产物仍只是 `research_draft`，P1-2 未收口，也不得据此推导任何 Gate F 结论 | 门仍按原阈值计算与记录，阈值、测量和 `neutral_fidelity.status` 判定均未改动；门未通过不再阻断 motion，报告 `quality.review_items` 会追加 `FIDELITY_GATE_NOT_PASSED`，并包含三项实测值以及从报告 `pass_thresholds` 读取的门限；模型 profile 身份不匹配或 `model_used` 证据不成立仍然硬失败 | `model-candidate` / `verify-model-candidate` 仍要求保真通过；candidate v0.3 的 `quality.review_items` 是固定 const、没有自由扩展点，故未降级，若要降级必须单独决策并升 schema 版本。单一样本不得外推门的可达性或模型的一般行为；降级不表示风险已缓解或门已通过，状态保持 `GATE_F_NOT_EVALUATED` | ML / F |
 
 ## 接受与升级
 

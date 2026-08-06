@@ -40,6 +40,7 @@
 - [CIR / `.oc2d` 逻辑规范](CIR_SPEC.md)
 - [`.oc2d` 包一致性规范](PACKAGE_CONFORMANCE.md)
 - [PSD 导出配置](PSD_EXPORT_PROFILE.md)
+- [产品路径实现说明](PRODUCTION_PATH.md)：`oneclick2d/` 的实现映射、能力边界与验证方式
 - [模型动态研究初稿](MODEL_MOTION_DRAFT.md)
 - [单项模型 Candidate 技术预检](../examples/gate-f-model-candidate/README.md)
 
@@ -55,6 +56,7 @@
 - [模型卡模板](templates/MODEL_CARD.md)
 - [数据集卡模板](templates/DATASET_CARD.md)
 - [ADR-0001：一期产品与格式边界](adr/0001-phase-1-product-and-format-boundary.md)
+- [ADR-0002：宿主中立模型身份与原生 Linux 运行时](adr/0002-native-linux-model-runtime.md)
 
 ## 隐私、安全与合规
 

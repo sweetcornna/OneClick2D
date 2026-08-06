@@ -43,6 +43,9 @@ from spikes.gate_f_runner.model_worker import (
     LEGACY_SOURCE_PRESERVE_PROFILE_SHA256,
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
     LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256,
+    LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID,
+    LEGACY_SOURCE_PRESERVE_V5_PROFILE_SHA256,
+    LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID,
     LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
     MAX_MODEL_ARTIFACT_MANIFEST_DEPTH,
     MAX_MODEL_ARTIFACT_MANIFEST_DIRECTORIES,
@@ -331,6 +334,24 @@ def write_model_fixture(run_dir: Path, source_sha256: str | None = None, *, publ
     return result
 
 
+def use_legacy_source_preserve_attestation(
+    result: dict[str, object],
+    *,
+    retain_binding: bool = False,
+) -> None:
+    attestation = result["entrypoint_attestation"]
+    if not isinstance(attestation, dict):
+        raise AssertionError("fixture entrypoint attestation is invalid")
+    if not retain_binding:
+        attestation.pop("binding")
+    attestation["policy_id"] = LEGACY_V4_NF4_MARIGOLD_DEVICE_POLICY_ID
+    attestation["psd_pixel_projection_algorithm_id"] = LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID
+    components = attestation["components"]
+    if not isinstance(components, dict) or not isinstance(components.get("vae"), dict):
+        raise AssertionError("fixture component attestation is invalid")
+    components["vae"]["execution_hook_devices"] = ["cuda:0"]
+
+
 def refresh_model_inventory(
     run_dir: Path,
     result: dict[str, object],
@@ -477,7 +498,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             run_dir.mkdir()
             write_model_fixture(run_dir)
             report = load_model_workbench_report(run_dir)
-            self.assertEqual("0.5.0", report["format_version"])
+            self.assertEqual("0.6.0", report["format_version"])
             self.assertEqual("model", report["workflow"])
             self.assertTrue(report["model_used"])
             self.assertFalse(report["oc2d_produced"])
@@ -598,7 +619,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
 
                 report = load_model_workbench_report(run_dir)
 
-                self.assertEqual("0.5.0", report["format_version"])
+                self.assertEqual("0.6.0", report["format_version"])
                 self.assertEqual(profile_id, report["model"]["identity"]["profile_id"])
                 self.assertEqual(algorithm, report["model"]["identity"]["postprocess_algorithm"])
                 self.assertEqual(
@@ -623,7 +644,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             result["profile_id"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
             result["profile_sha256"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
             result["dependencies_sha256"] = LEGACY_DEPENDENCIES_SHA256
-            result["entrypoint_attestation"].pop("binding")
+            use_legacy_source_preserve_attestation(result)
             (run_dir / "model-result.json").write_bytes(canonical_json_bytes(result))
 
             persisted_bytes = _legacy_workbench_report_v03_bytes(
@@ -648,7 +669,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             (run_dir / "workbench-report.json").write_bytes(persisted_bytes)
 
             report = load_model_workbench_report(run_dir)
-            self.assertEqual("0.5.0", report["format_version"])
+            self.assertEqual("0.6.0", report["format_version"])
             self.assertEqual(
                 LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID,
                 report["model"]["identity"]["profile_id"],
@@ -699,9 +720,11 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             result = write_model_fixture(run_dir, publish_result=False)
             result["profile_id"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
             result["profile_sha256"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
-            result["entrypoint_attestation"].pop("binding")
+            result["dependencies_sha256"] = LEGACY_DEPENDENCIES_SHA256
+            use_legacy_source_preserve_attestation(result)
             (run_dir / "model-result.json").write_bytes(canonical_json_bytes(result))
             report = build_model_workbench_report(run_dir, run_dir.name, result)
+            report["format_version"] = "0.5.0"
             (run_dir / "workbench-report.json").write_bytes(canonical_json_bytes(report))
 
             with self.assertRaisesRegex(
@@ -709,6 +732,32 @@ class GateFModelWorkbenchTests(unittest.TestCase):
                 "format version 0.5.0 is unsupported for this profile",
             ):
                 load_model_workbench_report(run_dir)
+
+    def test_loads_v05_persisted_report_for_historical_v5_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run.persisted-v05-v5"
+            run_dir.mkdir()
+            result = write_model_fixture(run_dir, publish_result=False)
+            result["profile_id"] = LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID
+            result["profile_sha256"] = LEGACY_SOURCE_PRESERVE_V5_PROFILE_SHA256
+            result["dependencies_sha256"] = LEGACY_DEPENDENCIES_SHA256
+            use_legacy_source_preserve_attestation(result, retain_binding=True)
+            (run_dir / "model-result.json").write_bytes(canonical_json_bytes(result))
+
+            current = build_model_workbench_report(run_dir, run_dir.name, result)
+            self.assertEqual("0.6.0", current["format_version"])
+            self.assertEqual(
+                LEGACY_SOURCE_PRESERVE_V5_PROFILE_ID,
+                current["model"]["identity"]["profile_id"],
+            )
+            self.assertEqual(
+                LEGACY_V4_PSD_PIXEL_PROJECTION_ALGORITHM_ID,
+                current["model"]["identity"]["postprocess_algorithm"],
+            )
+            persisted = {**current, "format_version": "0.5.0"}
+            (run_dir / "workbench-report.json").write_bytes(canonical_json_bytes(persisted))
+
+            self.assertEqual(current, load_model_workbench_report(run_dir))
 
     def test_rejects_unknown_persisted_report_version_with_version_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -928,7 +977,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             self.assertEqual("review_required", report["quality"]["neutral_fidelity"]["status"])
             with self.assertRaisesRegex(
                 StageContractError,
-                "requires a fidelity-passing active model profile",
+                "requires a matching active model profile identity and model_used evidence",
             ):
                 generate_model_motion_draft(run_dir)
             self.assertFalse((run_dir / "motion-draft").exists())
@@ -959,7 +1008,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
             result["profile_id"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID
             result["profile_sha256"] = LEGACY_SOURCE_PRESERVE_V4_PROFILE_SHA256
             result["dependencies_sha256"] = LEGACY_DEPENDENCIES_SHA256
-            result["entrypoint_attestation"].pop("binding")
+            use_legacy_source_preserve_attestation(result)
 
             report = build_model_workbench_report(run_dir, run_dir.name, result)
             identity = report["model"]["identity"]
@@ -969,7 +1018,7 @@ class GateFModelWorkbenchTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual("0.5.0", report["format_version"])
+            self.assertEqual("0.6.0", report["format_version"])
             self.assertEqual(LEGACY_SOURCE_PRESERVE_V4_PROFILE_ID, identity["profile_id"])
             self.assertEqual(
                 archived_v4["postprocess"]["algorithm_id"],

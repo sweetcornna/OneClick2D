@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.oneclick2d.invalid/gate-f-model-candidate/v0.3/config.schema.json",
+  "title": "OneClick2D Gate F Model Candidate Config v0.3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "format_version", "profile_id", "required_model_profile_id", "required_motion_profile_id", "required_pillow_version", "renderer_profile_id", "ontology_registry", "postprocess", "frame_sequence"],
+  "properties": {
+    "format": {"const": "oneclick2d.model-candidate-config"},
+    "format_version": {"const": "0.3.0"},
+    "profile_id": {"const": "oc2d.spike.model-candidate.source-preserve-v6.v1"},
+    "required_model_profile_id": {"const": "see-through.v3.nf4.1280.source-preserve.v6"},
+    "required_motion_profile_id": {"const": "oc2d.spike.model-motion-draft.affine-semantic.v15"},
+    "required_pillow_version": {"const": "12.1.0"},
+    "renderer_profile_id": {"const": "pillow-12.1.0-bilinear-premultiplied-srgb-source-over.v2"},
+    "ontology_registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "sha256"],
+      "properties": {
+        "id": {"const": "oneclick2d.ontology"},
+        "version": {"const": "0.1.0"},
+        "sha256": {"const": "ea03fdf0e757a9e15519b6fe7bad7ed50b7d736214cca3b8b74bfb9b57aa1c76"}
+      }
+    },
+    "postprocess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semantic_alpha_state", "visible_alpha_threshold", "visible_priority"],
+      "properties": {
+        "semantic_alpha_state": {"const": "source-preserve-v6-cleaned"},
+        "visible_alpha_threshold": {"const": 31},
+        "visible_priority": {"type": "array", "minItems": 23, "maxItems": 23, "uniqueItems": true, "items": {"type": "string"}}
+      }
+    },
+    "frame_sequence": {"$ref": "../../gate-f-frame-sequence/v0.1/config.schema.json"}
+  }
+}
