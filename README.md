@@ -50,7 +50,9 @@ python -m oneclick2d verify --package out/project.local.revision.0001.oc2d --psd
 
 ## 当前检查与预研烟雾测试
 
-以下固定命令中的模型支持命令必须从 Windows PowerShell 或 cmd 运行，并使用锁定的 Windows CPython/Pillow 12.1.0 环境；`model --source` 必须传 Windows 主机路径（例如 `C:/...`）。不支持直接从 WSL shell 调用这些模型命令。
+以下固定命令中的 active v6 模型支持命令在原生 Linux 宿主运行，并使用锁定的 CPython/Pillow 12.1.0 环境；`model --source` 必须传本机 POSIX 路径（例如 `/path/to/right-cleared.png`）。该 runtime 无隔离边界、仅限本机；历史 v4/v5 WSL2 profile 只用于按原身份只读验证，不是 active 操作步骤。
+
+GUI 的模型模式和显式 `model` 命令应使用已抠背景、背景透明的角色图（通常为 PNG）。不透明背景会被源侧保真统计计为可见区域，而语义层通常只覆盖角色；这是输入前提提示，不是新的硬阻断，已抠背景也不保证通过中性保真门。
 
 ```bash
 python scripts/validate_docs.py
@@ -58,7 +60,7 @@ python -m unittest discover -s tests -p "test_*.py"
 python -m spikes.gate_f_runner smoke --run-id run.local-smoke
 python -m spikes.gate_f_runner preflight --run-id run.local-technical
 python -m spikes.gate_f_runner gui
-python -m spikes.gate_f_runner model --source "C:/path/to/right-cleared.png" --run-id run.local-model
+python -m spikes.gate_f_runner model --source "/path/to/right-cleared.png" --run-id run.local-model
 python -m spikes.gate_f_runner diagnose-fidelity --run-id run.local-model
 python -m spikes.gate_f_runner motion --run-id run.local-model
 python -m spikes.gate_f_runner model-candidate --run-id run.local-model

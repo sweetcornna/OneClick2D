@@ -1138,26 +1138,40 @@ class GateFModelWorkerTests(unittest.TestCase):
             stdout=json.dumps(actual, separators=(",", ":")).encode("utf-8"),
             stderr=b"",
         )
-        with mock.patch.dict(os.environ, {"WSLENV": "SHOULD_NOT_PASS", "PYTHONPATH": "untrusted"}), mock.patch(
-            "spikes.gate_f_runner.model_worker._run_checked",
-            return_value=completed,
-        ) as run:
-            _verify_runtime(profile, runtime["dependencies_sha256"])
-        command = run.call_args.args[0]
-        kwargs = run.call_args.kwargs
-        self.assertNotIn("wsl.exe", command)
-        self.assertEqual(PINNED_MODEL_ROOT, kwargs["cwd"])
-        self.assertNotIn("WSLENV", kwargs["env"])
-        self.assertNotIn("PYTHONPATH", kwargs["env"])
-        self.assertEqual(
-            json.dumps([str(PINNED_MODEL_ROOT / "common")], separators=(",", ":")),
-            kwargs["env"]["ONECLICK2D_PYTHON_PATH_ENTRIES"],
-        )
-        actual["cuda_available"] = False
-        completed.stdout = json.dumps(actual, separators=(",", ":")).encode("utf-8")
-        with mock.patch("spikes.gate_f_runner.model_worker._run_checked", return_value=completed):
-            with self.assertRaisesRegex(StageContractError, "CUDA runtime is unavailable"):
-                _verify_runtime(profile, runtime["dependencies_sha256"])
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            code_root = home / runtime["code_root_relative_to_home"]
+            python = code_root / runtime["python_relative_to_code_root"]
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            for entry in runtime["python_path_entries"]:
+                (code_root / entry).mkdir(parents=True)
+
+            with mock.patch.object(Path, "home", return_value=home):
+                with mock.patch.dict(
+                    os.environ,
+                    {"WSLENV": "SHOULD_NOT_PASS", "PYTHONPATH": "untrusted"},
+                ), mock.patch(
+                    "spikes.gate_f_runner.model_worker._run_checked",
+                    return_value=completed,
+                ) as run:
+                    _verify_runtime(profile, runtime["dependencies_sha256"])
+                command = run.call_args.args[0]
+                kwargs = run.call_args.kwargs
+                self.assertNotIn("wsl.exe", command)
+                self.assertEqual(code_root.resolve(), kwargs["cwd"])
+                self.assertNotIn("WSLENV", kwargs["env"])
+                self.assertNotIn("PYTHONPATH", kwargs["env"])
+                self.assertEqual(
+                    json.dumps([(code_root / "common").resolve().as_posix()], separators=(",", ":")),
+                    kwargs["env"]["ONECLICK2D_PYTHON_PATH_ENTRIES"],
+                )
+
+                actual["cuda_available"] = False
+                completed.stdout = json.dumps(actual, separators=(",", ":")).encode("utf-8")
+                with mock.patch("spikes.gate_f_runner.model_worker._run_checked", return_value=completed):
+                    with self.assertRaisesRegex(StageContractError, "CUDA runtime is unavailable"):
+                        _verify_runtime(profile, runtime["dependencies_sha256"])
 
     def test_runtime_attestation_binds_dependency_profile(self) -> None:
         profile, _ = _load_profile()

@@ -72,6 +72,33 @@ class DocumentationValidationTests(unittest.TestCase):
 
         self.assertFalse(any("missing requirement headings" in error for error in errors))
 
+    def test_active_model_commands_use_native_linux_source_paths(self) -> None:
+        expected_command = (
+            'python -m spikes.gate_f_runner model --source "/path/to/right-cleared.png" '
+            "--run-id run.local-model"
+        )
+        documents = (
+            ROOT / "README.md",
+            ROOT / "CONTRIBUTING.md",
+            ROOT / "CLAUDE.md",
+            ROOT / "spikes/gate_f_runner/model_profiles/README.md",
+        )
+        for document in documents:
+            with self.subTest(document=document.relative_to(ROOT)):
+                text = document.read_text(encoding="utf-8")
+                self.assertIn(expected_command, text)
+                self.assertNotIn('"C:/path/to/right-cleared.png"', text)
+                self.assertIn("native-linux", text)
+                self.assertIn("none-host-local", text)
+                self.assertTrue(
+                    "已抠背景" in text
+                    or "cut-out character image with a transparent background" in text
+                )
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("必须从 Windows PowerShell 或 cmd 运行", readme)
+        self.assertNotIn("不支持直接从 WSL shell 调用", readme)
+
     def test_phase_1_docs_contain_no_prohibited_brand_claim(self) -> None:
         errors = validate_docs.validate_product_boundary_and_requirements()
 
