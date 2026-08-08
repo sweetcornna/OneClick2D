@@ -71,6 +71,8 @@ class GateFGuiServerTests(unittest.TestCase):
         self.assertIn(b"Image Workbench", body)
         self.assertIn(b'name="workflow"', body)
         self.assertIn(b'value="model"', body)
+        self.assertIn("模型模式应使用已抠背景、背景透明的角色图".encode(), body)
+        self.assertIn("已抠背景也不保证通过中性保真门".encode(), body)
         self.assertIn(b'data-model-view="motion"', body)
         self.assertIn(b'data-model-view="camera"', body)
         self.assertIn(b'id="live-canvas"', body)

@@ -47,7 +47,7 @@
           <label><input type="radio" name="workflow" value="baseline" checked><span>快速基线</span></label>
           <label><input type="radio" name="workflow" value="model"><span>See-through 模型</span></label>
         </fieldset>
-        <p id="model-notice" class="model-notice" hidden>固定 NF4 profile · 权重许可元数据待补齐 · 本机约 10 分钟</p>
+        <p id="model-notice" class="model-notice" hidden>模型模式应使用已抠背景、背景透明的角色图（通常为 PNG）。不透明背景会被源侧保真统计计为可见区域，而语义层通常只覆盖角色；已抠背景也不保证通过中性保真门。固定 NF4 profile · 权重许可元数据待补齐 · 本机约 10 分钟</p>
         <input id="source-file" class="sr-only" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg">
         <label id="drop-zone" class="drop-zone" for="source-file" tabindex="0">
           <span class="drop-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 15v4h16v-4"/></svg></span>

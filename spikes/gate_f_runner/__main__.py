@@ -300,7 +300,12 @@ def build_parser() -> argparse.ArgumentParser:
         "model",
         help="run the pinned host-neutral v6 model spike with the native Linux worker (no isolation; host-local only)",
     )
-    model.add_argument("--source", type=Path, required=True)
+    model.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        help="cut-out character image with a transparent background (normally PNG); transparency does not guarantee a fidelity pass",
+    )
     model.add_argument("--run-id", required=True)
     model.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
     model.add_argument("--timeout-seconds", type=int, default=1800)

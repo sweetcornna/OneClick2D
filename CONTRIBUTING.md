@@ -28,14 +28,14 @@ python -m oneclick2d verify --package out/<name>.oc2d --psd out/<name>.psd
 
 ### Gate F 预研（`spikes/`，可丢弃）
 
-以下模型支持命令使用无隔离边界、仅限本机的原生 Linux worker。
+以下模型支持命令使用无隔离边界、仅限本机的原生 Linux worker。GUI 的模型模式和显式 `model` 命令应使用已抠背景、背景透明的角色图（通常为 PNG）；不透明背景会被源侧保真统计计为可见区域，而语义层通常只覆盖角色。该提示不是新的硬阻断，已抠背景也不保证通过中性保真门。
 
 ```bash
 python scripts/validate_docs.py
 python -m spikes.gate_f_runner smoke --run-id run.local-smoke
 python -m spikes.gate_f_runner preflight --run-id run.local-technical
 python -m spikes.gate_f_runner gui
-python -m spikes.gate_f_runner model --source "C:/path/to/right-cleared.png" --run-id run.local-model
+python -m spikes.gate_f_runner model --source "/path/to/right-cleared.png" --run-id run.local-model
 python -m spikes.gate_f_runner diagnose-fidelity --run-id run.local-model
 python -m spikes.gate_f_runner motion --run-id run.local-model
 python -m spikes.gate_f_runner model-candidate --run-id run.local-model
